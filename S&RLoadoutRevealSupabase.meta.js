@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S&R Loadout Aggregator
 // @namespace    sr.loadout.logger
-// @version      1.3.0
+// @version      2.1.0
 // @license      All Rights Reserved
 // @description  Captures Torn attack data and renders saved loadouts.
 // @author       You
