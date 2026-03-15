@@ -232,7 +232,7 @@ function extractLoadoutFromAttackData(db) {
     }
 
     function updateBlacklistedDisplay() {
-        const panel = W.document.getElementById("sr-loadout-panel-inner");
+        const panel = W.document.getElementById("loadout-panel-inner");
         if (panel) panel.innerHTML = `
             <div style="display:flex;flex-direction:column;align-items:center;gap:5px;text-align:center;">
                 <div style="font-size:14px;">&#9888;&#65039; You have been blacklisted from this service</div>
@@ -244,7 +244,7 @@ function extractLoadoutFromAttackData(db) {
         if (!el) return;
 
         if (!licence || new Date(licence.expires) < new Date()) {
-            const panel = W.document.getElementById("sr-loadout-panel-inner");
+            const panel = W.document.getElementById("loadout-panel-inner");
             if (panel) panel.innerHTML = `
                 <div style="font-weight:700;margin-bottom:8px;">Your licence has expired!</div>
                 <div style="display:flex;flex-direction:column;gap:6px;">
@@ -274,7 +274,7 @@ function extractLoadoutFromAttackData(db) {
 
     function createPanel() {
         const host = W.document.createElement("div");
-        host.id = "sr-loadout-panel";
+        host.id = "loadout-panel";
         host.style.cssText = [
             "position:relative", "display:inline-flex", "align-items:center", "gap:8px",
             "font:12px/1.3 'Segoe UI',Tahoma,sans-serif", "margin-left:8px",
@@ -290,7 +290,7 @@ function extractLoadoutFromAttackData(db) {
         ].join(";");
 
         const panel = W.document.createElement("div");
-        panel.id = "sr-loadout-panel-inner";
+        panel.id = "loadout-panel-inner";
         panel.style.cssText = [
             "display:none", "position:absolute", "top:calc(100% + 4px)", "left:100%", "transform:translateX(-100%)",
             "width:320px", "z-index:2147483647",
@@ -626,7 +626,7 @@ W.testSupabaseConnection = testSupabaseConnection;
     }
 
     function initPanel() {
-        if (W.document.getElementById("sr-loadout-panel")) return true;
+        if (W.document.getElementById("loadout-panel")) return true;
         const labelsContainer = W.document.querySelector("[class*='labelsContainer']");
         if (!labelsContainer) return false;
 
