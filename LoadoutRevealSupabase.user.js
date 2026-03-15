@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      2.3.0
+// @version      2.4.0
 // @description  Captures Torn attack data and renders saved loadouts.
-// @author       Modified
+// @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
@@ -21,16 +21,9 @@
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
-    const ALLOWED_FACTIONS = [
-        // Put your allowed faction IDs here
-        // Example:
-        // 12345,
-        // 67890,
-    ];
-
-    const CFG = {
+        const CFG = {
         supabaseUrl: "https://supabase.grusmedia.no:444",
-        supabaseAnonKey: "YOUR_SUPABASE_ANON_KEY_HERE",
+        supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlhdCI6MTc0OTU5MzQ2NiwiZXhwIjoyMDY0OTUzNDY2fQ.Eq_oqn_miVnHoQGO1gbZJQgmonJRAxv7NQRgoWg5Z_Q",
         tableName: "loadouts", // Change if your actual table is named something else
         store: {
             apiKey: "loadout_loader_api_key",
@@ -226,9 +219,19 @@
                 factionName
             };
 
-            const allowed = ALLOWED_FACTIONS.length === 0
-                ? true
-                : ALLOWED_FACTIONS.includes(Number(factionId));
+            if (!factionId) {
+                toast("Could not determine your faction from Torn.", 8000);
+                STATE.authChecked = true;
+                STATE.isAuthorized = false;
+                return false;
+            }
+
+            const allowedRes = await supabaseRequest(
+                "GET",
+                `/allowed_factions?faction_id=eq.${encodeURIComponent(factionId)}&is_active=eq.true&select=faction_id,faction_name&limit=1`
+            );
+
+            const allowed = !!(allowedRes.ok && Array.isArray(allowedRes.data) && allowedRes.data.length);
 
             STATE.authChecked = true;
             STATE.isAuthorized = allowed;
