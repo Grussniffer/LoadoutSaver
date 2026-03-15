@@ -10,6 +10,6 @@
 // @grant        unsafeWindow
 // @connect      supabase.grusmedia.no
 // @run-at       document-start
-// @downloadURL  https://raw.githubusercontent.com/YOURUSER/YOURREPO/main/S-R-Loadout-Aggregator.user.js
-// @updateURL    https://raw.githubusercontent.com/YOURUSER/YOURREPO/main/S-R-Loadout-Aggregator.meta.js
+// @downloadURL  https://raw.githubusercontent.com/Grussniffer/LoadoutSaver/main/LoadoutRevealSupabase.user.js
+// @updateURL    https://raw.githubusercontent.com/Grussniffer/LoadoutSaver/main/LoadoutRevealSupabase.meta.js
 // ==/UserScript==
