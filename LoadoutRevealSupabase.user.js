@@ -1,10 +1,9 @@
 // ==UserScript==
-// @name         S&R Loadout Aggregator
-// @namespace    sr.loadout.logger
+// @name         Loadout Aggregator
+// @namespace    loadout.loader
 // @version      2.1.0
-// @license      All Rights Reserved
 // @description  Captures Torn attack data and renders saved loadouts.
-// @author       SneipStealLadd
+// @author       SneipLadd
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
@@ -357,37 +356,6 @@ function extractLoadoutFromAttackData(db) {
         host.appendChild(stamp);
 
         return { host, panel, toastHost };
-    }
-
-    /* Registration */
-    async function registerUser() {
-        const apiKey = getAPIKey();
-        if (!apiKey) return;
-
-        try {
-            const tornRes = await W.fetch(`https://api.torn.com/v2/user/basic?key=${encodeURIComponent(apiKey)}`);
-            const tornData = await tornRes.json();
-            if (tornData.error) {
-                toast(`Invalid API key: ${tornData.error.error}`, 5000);
-                return;
-            }
-            const playerId = tornData.profile?.id;
-
-            const regRes = await apiRequest("POST", "/register", { player_id: playerId, api_key: apiKey });
-            if (regRes.ok || regRes.status === 409) {
-                if (regRes.ok) {
-                    toast(`Registered as ${tornData.profile.name} [${playerId}]`);
-                }
-                if (regRes.data?.licence) updateLicenceDisplay(regRes.data.licence);
-                fetchAndRenderLoadout();
-            } else {
-                if (regRes.data?.error?.code === 7) updateLicenceDisplay(null);
-                if (regRes.data?.error?.code === 8) updateBlacklistedDisplay();
-                toastErr(regRes.data);
-            }
-        } catch {
-            toast("Failed to validate API key");
-        }
     }
 
     /* Fetch & Render Loadout */
