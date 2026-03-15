@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         S&R Loadout Aggregator
-// @namespace    sr.loadout.logger
-// @version      2.1.0
+// @name         Loadout Loader
+// @namespace    loadout.loader
+// @version      2.2.0
 // @license      All Rights Reserved
 // @description  Captures Torn attack data and renders saved loadouts.
-// @author       You
+// @author       Modified
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
