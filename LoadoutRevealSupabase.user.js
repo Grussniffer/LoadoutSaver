@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "2.3.0";
+    const SCRIPT_VERSION = "2.4.0";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
