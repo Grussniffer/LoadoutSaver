@@ -204,7 +204,7 @@ function extractLoadoutFromAttackData(db) {
             "box-shadow:0 10px 26px rgba(0,0,0,0.35)",
         ].join(";");
         el.innerHTML = `
-            <div style="font-weight:700;font-size:11px;color:#a0bcd8;margin-bottom:4px;">S&R Loadout Aggregator</div>
+            <div style="font-weight:700;font-size:11px;color:#a0bcd8;margin-bottom:4px;">Loadout Loader</div>
             <div>${escapeHtml(message)}</div>`;
         host.appendChild(el);
         W.setTimeout(() => el.remove(), duration);
@@ -281,7 +281,7 @@ function extractLoadoutFromAttackData(db) {
         ].join(";");
 
         const btn = W.document.createElement("button");
-        btn.textContent = "S&R Settings";
+        btn.textContent = "Loader Settings";
         btn.style.cssText = [
             "border:1px solid rgba(255,255,255,0.16)", "background:rgba(15,23,34,0.96)",
             "color:#dfefff", "padding:0 10px", "border-radius:8px", "cursor:pointer",
@@ -310,7 +310,7 @@ function extractLoadoutFromAttackData(db) {
                </div>`;
 
         panel.innerHTML = `
-            <div style="font-weight:700;margin-bottom:8px;">S&R Loadout Aggregator - Settings</div>
+            <div style="font-weight:700;margin-bottom:8px;">Loadout Loader - Settings</div>
             ${pdaKeyControls}
             <label style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer;color:#b9cfe5;font-size:12px;">
                 <input id="sr-quiet-chk" type="checkbox" ${getLocalStorage(CFG.store.quietToasts) === "1" ? "checked" : ""}>
@@ -630,7 +630,7 @@ W.testSupabaseConnection = testSupabaseConnection;
         const labelsContainer = W.document.querySelector("[class*='labelsContainer']");
         if (!labelsContainer) return false;
 
-        console.log(`[S&R Loadout Aggregator] Script loaded v${SCRIPT_VERSION}`);
+        console.log(`[Loadout Loader] Script loaded v${SCRIPT_VERSION}`);
 
         const { host, panel, toastHost } = createPanel();
         labelsContainer.insertBefore(host, labelsContainer.firstChild);
