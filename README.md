@@ -1,2 +1,2 @@
 # LoadoutSaver
-Tampermonkey script to reveal loadout
+Tampermonkey script to load / upload Enemy loadout to DB
