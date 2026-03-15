@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Loadout Aggregator
+// @name         Loadout Loader
 // @namespace    loadout.loader
 // @version      2.2.0
 // @description  Captures Torn attack data and renders saved loadouts.
