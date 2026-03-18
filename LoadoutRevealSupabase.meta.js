@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      2.4.1
+// @version      2.5.0
 // @description  Captures Torn attack data and renders saved loadouts.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
