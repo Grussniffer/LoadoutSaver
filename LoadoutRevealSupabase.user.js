@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      2.5.2
+// @version      2.5.3
 // @description  Captures Torn attack data and renders saved loadouts.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -914,41 +914,53 @@
 
     W.testSupabaseInsert = testSupabaseInsert;
 
-function processResponse(data) {
-    if (!data || typeof data !== "object") return;
-    if (!data.attackerUser && !data.DB?.attackerUser) return;
+    function processResponse(data) {
+        if (!data || typeof data !== "object") return;
+        if (!data.attackerUser && !data.DB?.attackerUser) return;
 
-    const db = data.DB || data;
-    const newDefenderId = extractUserId(db?.defenderUser);
-    const oldDefenderId = extractUserId(STATE.attackData?.defenderUser);
-    const isFirstData = !STATE.attackData;
+        const db = data.DB || data;
+        const isFirstData = !STATE.attackData;
+        STATE.attackData = db;
 
-    if (newDefenderId && oldDefenderId && newDefenderId !== oldDefenderId) {
-        STATE.uploaded = false;
-        STATE.loadoutRendered = false;
+        const hasNative = hasNativeDefenderLoadout(db?.defenderItems);
+
+        log("attackData received", {
+            attackerUser: db?.attackerUser,
+            defenderUser: db?.defenderUser,
+            defenderItems: db?.defenderItems,
+            hasNative
+        });
+
+        if (hasNative && !STATE.uploaded) {
+            STATE.uploaded = true;
+            whenVisible(() => uploadLoadoutData(db));
+        } else if (isFirstData) {
+            fetchAndRenderLoadout();
+        }
     }
 
-    STATE.attackData = db;
+    if (typeof W.fetch === "function") {
+        const origFetch = W.fetch;
 
-    const extractedLoadout = extractLoadoutFromAttackData(db);
-    const hasLoadout = !!extractedLoadout;
+        W.fetch = async function (...args) {
+            const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
+            if (!url.includes("sid=attackData")) {
+                return origFetch.apply(this, args);
+            }
 
-    log("attackData received", {
-        attackerUser: db?.attackerUser,
-        defenderUser: db?.defenderUser,
-        defenderItems: db?.defenderItems,
-        hasNative: hasNativeDefenderLoadout(db?.defenderItems),
-        hasLoadout,
-        extractedLoadout
-    });
-
-    if (hasLoadout && !STATE.uploaded) {
-        STATE.uploaded = true;
-        whenVisible(() => uploadLoadoutData(db));
-    } else if (isFirstData) {
-        fetchAndRenderLoadout();
+            const response = await origFetch.apply(this, args);
+            try {
+                response.clone().text().then(text => {
+                    const parsed = parseJson(text);
+                    log("Intercepted attackData fetch", { url, parsed });
+                    processResponse(parsed);
+                });
+            } catch (err) {
+                log("Failed processing intercepted attackData", err);
+            }
+            return response;
+        };
     }
-}
 
     function initPanel() {
         if (W.document.getElementById("loadout-panel")) return true;
