@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      2.4.1
+// @version      2.5.0
 // @description  Captures Torn attack data and renders saved loadouts.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -17,18 +17,19 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "2.4.0";
+    const SCRIPT_VERSION = "2.5.0";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
-        const CFG = {
+    const CFG = {
         supabaseUrl: "https://supabase.grusmedia.no:444",
         supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlhdCI6MTc0OTU5MzQ2NiwiZXhwIjoyMDY0OTUzNDY2fQ.Eq_oqn_miVnHoQGO1gbZJQgmonJRAxv7NQRgoWg5Z_Q",
-        tableName: "loadouts", // Change if your actual table is named something else
+        tableName: "loadouts",
         store: {
             apiKey: "loadout_loader_api_key",
             quietToasts: "loadout_loader_quiet_mode"
-        }
+        },
+        debug: true
     };
 
     const STATE = {
@@ -40,6 +41,10 @@
         userInfo: null,
         authPromise: null
     };
+
+    function log(...args) {
+        if (CFG.debug) console.log("[Loadout Loader]", ...args);
+    }
 
     function getLocalStorage(key) {
         try { return localStorage.getItem(key); } catch { return null; }
@@ -122,6 +127,8 @@
         const url = `${CFG.supabaseUrl}/rest/v1${path}`;
         const bridge = W.flutter_inappwebview;
 
+        log("Supabase request", { method, url, body });
+
         if (bridge?.callHandler) {
             const headers = supabaseHeaders(extraHeaders);
             const handler = method === "GET" ? "PDA_httpGet" : "PDA_httpPost";
@@ -130,12 +137,19 @@
                 : bridge.callHandler(handler, url, headers, body ? JSON.stringify(body) : "");
 
             return call
-                .then(r => ({
-                    ok: Number(r?.status || 0) >= 200 && Number(r?.status || 0) < 300,
-                    status: Number(r?.status || 0),
-                    data: parseJson(String(r?.responseText || ""))
-                }))
-                .catch(() => ({ ok: false, status: 0, data: null }));
+                .then(r => {
+                    const result = {
+                        ok: Number(r?.status || 0) >= 200 && Number(r?.status || 0) < 300,
+                        status: Number(r?.status || 0),
+                        data: parseJson(String(r?.responseText || ""))
+                    };
+                    log("Supabase response (PDA)", result);
+                    return result;
+                })
+                .catch((err) => {
+                    log("Supabase PDA request failed", err);
+                    return { ok: false, status: 0, data: null };
+                });
         }
 
         if (typeof GM_xmlhttpRequest === "function") {
@@ -146,13 +160,23 @@
                     url,
                     headers,
                     ...(body ? { data: JSON.stringify(body) } : {}),
-                    onload: (r) => resolve({
-                        ok: r.status >= 200 && r.status < 300,
-                        status: r.status,
-                        data: parseJson(r.responseText)
-                    }),
-                    onerror: () => resolve({ ok: false, status: 0, data: null }),
-                    ontimeout: () => resolve({ ok: false, status: 0, data: null })
+                    onload: (r) => {
+                        const result = {
+                            ok: r.status >= 200 && r.status < 300,
+                            status: r.status,
+                            data: parseJson(r.responseText)
+                        };
+                        log("Supabase response (GM)", result);
+                        resolve(result);
+                    },
+                    onerror: (err) => {
+                        log("Supabase request error (GM)", err);
+                        resolve({ ok: false, status: 0, data: null });
+                    },
+                    ontimeout: () => {
+                        log("Supabase request timeout (GM)");
+                        resolve({ ok: false, status: 0, data: null });
+                    }
                 };
                 GM_xmlhttpRequest(req);
             });
@@ -163,12 +187,19 @@
             headers: supabaseHeaders(extraHeaders),
             ...(body ? { body: JSON.stringify(body) } : {})
         })
-            .then(async (r) => ({
-                ok: r.ok,
-                status: r.status,
-                data: parseJson(await r.text())
-            }))
-            .catch(() => ({ ok: false, status: 0, data: null }));
+            .then(async (r) => {
+                const result = {
+                    ok: r.ok,
+                    status: r.status,
+                    data: parseJson(await r.text())
+                };
+                log("Supabase response (fetch)", result);
+                return result;
+            })
+            .catch((err) => {
+                log("Supabase fetch failed", err);
+                return { ok: false, status: 0, data: null };
+            });
     }
 
     function extractFactionId(profile) {
@@ -197,6 +228,8 @@
         try {
             const res = await W.fetch(`https://api.torn.com/v2/user/profile?key=${encodeURIComponent(apiKey)}`);
             const data = await res.json();
+
+            log("Torn profile response", { status: res.status, data });
 
             if (!res.ok || data?.error) {
                 toast(`Invalid API key: ${data?.error?.error || "Unknown error"}`, 5000);
@@ -236,12 +269,19 @@
             STATE.authChecked = true;
             STATE.isAuthorized = allowed;
 
+            log("Authorization result", {
+                allowed,
+                userInfo: STATE.userInfo,
+                allowedRes
+            });
+
             if (!allowed) {
                 toast("Your faction is not authorized to use this script.", 8000);
             }
 
             return allowed;
-        } catch {
+        } catch (err) {
+            log("Failed to validate API key", err);
             toast("Failed to validate API key.", 5000);
             STATE.authChecked = true;
             STATE.isAuthorized = false;
@@ -278,6 +318,14 @@
         }));
     }
 
+    function extractItemId(raw) {
+        return raw?.ID ?? raw?.id ?? raw?.item_id ?? raw?.itemID ?? null;
+    }
+
+    function extractUserId(user) {
+        return user?.userID ?? user?.id ?? user?.player_id ?? null;
+    }
+
     function extractSlotItem(slotData) {
         if (!slotData) return null;
 
@@ -289,7 +337,7 @@
 
         if (!raw) return null;
 
-        const itemId = raw?.ID ?? raw?.id ?? raw?.item_id ?? raw?.itemID;
+        const itemId = extractItemId(raw);
         if (!itemId) return null;
 
         return {
@@ -315,6 +363,7 @@
             if (parsed) loadout[slot] = parsed;
         }
 
+        log("Extracted loadout", loadout);
         return Object.keys(loadout).length ? loadout : null;
     }
 
@@ -525,13 +574,18 @@
         updateAuthStatus();
         if (!authorized) return;
 
-        const targetId = STATE.attackData?.defenderUser?.userID;
-        if (!targetId) return;
+        const targetId = extractUserId(STATE.attackData?.defenderUser);
+        if (!targetId) {
+            log("No target ID available for fetch");
+            return;
+        }
 
         const res = await supabaseRequest(
             "GET",
             `/${CFG.tableName}?defender_id=eq.${encodeURIComponent(targetId)}&select=loadout,inserted_at&limit=1`
         );
+
+        log("Fetched saved loadout", res);
 
         if (!res.ok || !Array.isArray(res.data) || !res.data.length) return;
 
@@ -689,23 +743,23 @@
         }
     }
 
-function hasNativeDefenderLoadout(defenderItems) {
-    if (!defenderItems || typeof defenderItems !== "object") return false;
+    function hasNativeDefenderLoadout(defenderItems) {
+        if (!defenderItems || typeof defenderItems !== "object") return false;
 
-    return Object.entries(defenderItems).some(([key, slot]) => {
-        const k = Number(key);
-        if (!(k >= 1 && k <= 9)) return false;
+        return Object.entries(defenderItems).some(([key, slot]) => {
+            const k = Number(key);
+            if (!(k >= 1 && k <= 9)) return false;
 
-        const raw =
-            slot?.item?.[0] ||
-            slot?.item ||
-            slot?.weapon ||
-            slot;
+            const raw =
+                slot?.item?.[0] ||
+                slot?.item ||
+                slot?.weapon ||
+                slot;
 
-        const itemId = raw?.ID ?? raw?.id ?? raw?.item_id ?? raw?.itemID;
-        return !!itemId;
-    });
-}
+            const itemId = extractItemId(raw);
+            return !!itemId;
+        });
+    }
 
     function renderLoadout(loadout, inserted) {
         if (!loadout || STATE.loadoutRendered) return;
@@ -759,16 +813,29 @@ function hasNativeDefenderLoadout(defenderItems) {
     async function uploadLoadoutData(raw) {
         const authorized = await ensureAuthorized();
         updateAuthStatus();
-        if (!authorized) return;
+        if (!authorized) {
+            log("Upload blocked: not authorized");
+            return;
+        }
 
         const apiKey = getAPIKey();
-        const attackerId = raw?.attackerUser?.userID;
-        const defenderId = raw?.defenderUser?.userID;
+        const attackerId = extractUserId(raw?.attackerUser);
+        const defenderId = extractUserId(raw?.defenderUser);
 
-        if (!apiKey || !attackerId || !defenderId) return;
+        if (!apiKey || !attackerId || !defenderId) {
+            log("Upload blocked: missing required IDs", {
+                hasApiKey: !!apiKey,
+                attackerUser: raw?.attackerUser,
+                defenderUser: raw?.defenderUser
+            });
+            return;
+        }
 
         const loadout = extractLoadoutFromAttackData(raw);
-        if (!loadout) return;
+        if (!loadout) {
+            log("Upload blocked: no loadout extracted", raw?.defenderItems);
+            return;
+        }
 
         const payload = {
             defender_id: defenderId,
@@ -783,12 +850,16 @@ function hasNativeDefenderLoadout(defenderItems) {
             raw_payload: raw
         };
 
+        log("Uploading loadout payload", payload);
+
         const res = await supabaseRequest(
             "POST",
             `/${CFG.tableName}?on_conflict=defender_id`,
             payload,
             { Prefer: "resolution=merge-duplicates,return=representation" }
         );
+
+        log("Upload response", res);
 
         if (res.ok) {
             toastInfo("Defender loadout saved");
@@ -823,8 +894,46 @@ function hasNativeDefenderLoadout(defenderItems) {
 
     W.testLoadoutAuthorization = testAuthorization;
 
+    async function testSupabaseInsert() {
+        if (!STATE.authChecked) {
+            await ensureAuthorized();
+            updateAuthStatus();
+        }
+
+        const res = await supabaseRequest(
+            "POST",
+            `/${CFG.tableName}`,
+            {
+                defender_id: 999999999,
+                attacker_id: 111111111,
+                defender_name: "Test Defender",
+                attacker_name: "Test Attacker",
+                uploader_player_id: STATE.userInfo?.playerId || null,
+                uploader_player_name: STATE.userInfo?.playerName || null,
+                uploader_faction_id: STATE.userInfo?.factionId || null,
+                uploader_faction_name: STATE.userInfo?.factionName || null,
+                loadout: {
+                    1: {
+                        item_id: 1,
+                        item_name: "Test Weapon",
+                        damage: 10,
+                        accuracy: 10,
+                        rarity: "",
+                        mods: [],
+                        bonuses: []
+                    }
+                },
+                raw_payload: { test: true, version: SCRIPT_VERSION }
+            }
+        );
+
+        console.log("[Loadout Loader Test] Insert test:", res);
+        toast(res.ok ? "Insert worked" : "Insert failed", 5000);
+    }
+
+    W.testSupabaseInsert = testSupabaseInsert;
+
     function processResponse(data) {
-        
         if (!data || typeof data !== "object") return;
         if (!data.attackerUser && !data.DB?.attackerUser) return;
 
@@ -832,7 +941,17 @@ function hasNativeDefenderLoadout(defenderItems) {
         const isFirstData = !STATE.attackData;
         STATE.attackData = db;
 
-        if (hasNativeDefenderLoadout(db.defenderItems) && !STATE.uploaded) {
+        const hasNative = hasNativeDefenderLoadout(db?.defenderItems);
+
+        log("attackData received", {
+            db,
+            attackerUser: db?.attackerUser,
+            defenderUser: db?.defenderUser,
+            defenderItems: db?.defenderItems,
+            hasNative
+        });
+
+        if (hasNative && !STATE.uploaded) {
             STATE.uploaded = true;
             whenVisible(() => uploadLoadoutData(db));
         } else if (isFirstData) {
@@ -851,8 +970,14 @@ function hasNativeDefenderLoadout(defenderItems) {
 
             const response = await origFetch.apply(this, args);
             try {
-                response.clone().text().then(text => processResponse(parseJson(text)));
-            } catch {}
+                response.clone().text().then(text => {
+                    const parsed = parseJson(text);
+                    log("Intercepted attackData fetch", { url, parsed });
+                    processResponse(parsed);
+                });
+            } catch (err) {
+                log("Failed processing intercepted attackData", err);
+            }
             return response;
         };
     }
@@ -863,7 +988,7 @@ function hasNativeDefenderLoadout(defenderItems) {
         const labelsContainer = W.document.querySelector("[class*='labelsContainer']");
         if (!labelsContainer) return false;
 
-        console.log(`[Loadout Loader] Script loaded v${SCRIPT_VERSION}`);
+        log(`Script loaded v${SCRIPT_VERSION}`);
 
         const { host, panel, toastHost } = createPanel();
         labelsContainer.insertBefore(host, labelsContainer.firstChild);
@@ -880,38 +1005,6 @@ function hasNativeDefenderLoadout(defenderItems) {
         updateAuthStatus();
         return true;
     }
-    async function testSupabaseInsert() {
-    const res = await supabaseRequest(
-        "POST",
-        `/${CFG.tableName}`,
-        {
-            defender_id: 999999999,
-            attacker_id: 111111111,
-            defender_name: "Test Defender",
-            attacker_name: "Test Attacker",
-            uploader_player_id: STATE.userInfo?.playerId || null,
-            uploader_player_name: STATE.userInfo?.playerName || null,
-            uploader_faction_id: STATE.userInfo?.factionId || null,
-            uploader_faction_name: STATE.userInfo?.factionName || null,
-            loadout: {
-                1: {
-                    item_id: 1,
-                    item_name: "Test Weapon",
-                    damage: 10,
-                    accuracy: 10,
-                    rarity: "",
-                    mods: [],
-                    bonuses: []
-                }
-            },
-            raw_payload: { test: true }
-        }
-    );
-
-    console.log("[Loadout Loader Test] Insert test:", res);
-    toast(res.ok ? "Insert worked" : "Insert failed", 5000);
-}
-W.testSupabaseInsert = testSupabaseInsert;
 
     if (!initPanel()) {
         const waitForPanel = W.setInterval(() => {
