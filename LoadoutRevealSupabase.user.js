@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      2.4.0
+// @version      2.4.1
 // @description  Captures Torn attack data and renders saved loadouts.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -689,14 +689,23 @@
         }
     }
 
-    function hasNativeDefenderLoadout(defenderItems) {
-        if (!defenderItems || typeof defenderItems !== "object") return false;
+function hasNativeDefenderLoadout(defenderItems) {
+    if (!defenderItems || typeof defenderItems !== "object") return false;
 
-        return Object.entries(defenderItems).some(([key, slot]) => {
-            const k = Number(key);
-            return k >= 1 && k <= 9 && slot?.item?.[0]?.ID;
-        });
-    }
+    return Object.entries(defenderItems).some(([key, slot]) => {
+        const k = Number(key);
+        if (!(k >= 1 && k <= 9)) return false;
+
+        const raw =
+            slot?.item?.[0] ||
+            slot?.item ||
+            slot?.weapon ||
+            slot;
+
+        const itemId = raw?.ID ?? raw?.id ?? raw?.item_id ?? raw?.itemID;
+        return !!itemId;
+    });
+}
 
     function renderLoadout(loadout, inserted) {
         if (!loadout || STATE.loadoutRendered) return;
@@ -815,6 +824,7 @@
     W.testLoadoutAuthorization = testAuthorization;
 
     function processResponse(data) {
+        
         if (!data || typeof data !== "object") return;
         if (!data.attackerUser && !data.DB?.attackerUser) return;
 
@@ -870,6 +880,38 @@
         updateAuthStatus();
         return true;
     }
+    async function testSupabaseInsert() {
+    const res = await supabaseRequest(
+        "POST",
+        `/${CFG.tableName}`,
+        {
+            defender_id: 999999999,
+            attacker_id: 111111111,
+            defender_name: "Test Defender",
+            attacker_name: "Test Attacker",
+            uploader_player_id: STATE.userInfo?.playerId || null,
+            uploader_player_name: STATE.userInfo?.playerName || null,
+            uploader_faction_id: STATE.userInfo?.factionId || null,
+            uploader_faction_name: STATE.userInfo?.factionName || null,
+            loadout: {
+                1: {
+                    item_id: 1,
+                    item_name: "Test Weapon",
+                    damage: 10,
+                    accuracy: 10,
+                    rarity: "",
+                    mods: [],
+                    bonuses: []
+                }
+            },
+            raw_payload: { test: true }
+        }
+    );
+
+    console.log("[Loadout Loader Test] Insert test:", res);
+    toast(res.ok ? "Insert worked" : "Insert failed", 5000);
+}
+W.testSupabaseInsert = testSupabaseInsert;
 
     if (!initPanel()) {
         const waitForPanel = W.setInterval(() => {
