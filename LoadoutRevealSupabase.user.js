@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      2.5.0
+// @version      2.5.1
 // @description  Captures Torn attack data and renders saved loadouts.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "2.5.0";
+    const SCRIPT_VERSION = "2.5.1";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -155,7 +155,7 @@
         if (typeof GM_xmlhttpRequest === "function") {
             return new Promise((resolve) => {
                 const headers = supabaseHeaders(extraHeaders);
-                const req = {
+                GM_xmlhttpRequest({
                     method,
                     url,
                     headers,
@@ -177,8 +177,7 @@
                         log("Supabase request timeout (GM)");
                         resolve({ ok: false, status: 0, data: null });
                     }
-                };
-                GM_xmlhttpRequest(req);
+                });
             });
         }
 
@@ -554,17 +553,13 @@
         }
 
         if (!STATE.isAuthorized) {
-            const factionText = STATE.userInfo?.factionName
-                ? ` (${STATE.userInfo.factionName})`
-                : "";
+            const factionText = STATE.userInfo?.factionName ? ` (${STATE.userInfo.factionName})` : "";
             statusEl.textContent = `Authorization: Denied${factionText}`;
             statusEl.style.color = "#ff8f8f";
             return;
         }
 
-        const factionText = STATE.userInfo?.factionName
-            ? ` (${STATE.userInfo.factionName})`
-            : "";
+        const factionText = STATE.userInfo?.factionName ? ` (${STATE.userInfo.factionName})` : "";
         statusEl.textContent = `Authorization: Allowed${factionText}`;
         statusEl.style.color = "#7bcf9a";
     }
@@ -590,9 +585,7 @@
         if (!res.ok || !Array.isArray(res.data) || !res.data.length) return;
 
         const row = res.data[0];
-        if (row?.loadout) {
-            renderLoadout(row.loadout, row.inserted_at);
-        }
+        if (row?.loadout) renderLoadout(row.loadout, row.inserted_at);
     }
 
     function queryFirst(root, selectors) {
@@ -842,12 +835,7 @@
             attacker_id: attackerId,
             defender_name: raw?.defenderUser?.name || null,
             attacker_name: raw?.attackerUser?.name || null,
-            uploader_player_id: STATE.userInfo?.playerId || null,
-            uploader_player_name: STATE.userInfo?.playerName || null,
-            uploader_faction_id: STATE.userInfo?.factionId || null,
-            uploader_faction_name: STATE.userInfo?.factionName || null,
-            loadout,
-            raw_payload: raw
+            loadout
         };
 
         log("Uploading loadout payload", payload);
@@ -876,7 +864,9 @@
         );
 
         console.log("[Loadout Loader Test] Supabase test response:", res);
+        console.log("[Loadout Loader Test] Supabase test data:", JSON.stringify(res.data, null, 2));
         toast(res.ok ? "Supabase reachable" : "Supabase NOT reachable", 5000);
+        return res;
     }
 
     W.testSupabaseConnection = testSupabaseConnection;
@@ -885,21 +875,15 @@
         resetAuthorizationState();
         const ok = await ensureAuthorized();
         updateAuthStatus();
-        console.log("[Loadout Loader Test] Authorization:", {
-            ok,
-            userInfo: STATE.userInfo
-        });
+        const result = { ok, userInfo: STATE.userInfo };
+        console.log("[Loadout Loader Test] Authorization:", result);
         toast(ok ? "Authorization successful" : "Authorization failed", 5000);
+        return result;
     }
 
     W.testLoadoutAuthorization = testAuthorization;
 
     async function testSupabaseInsert() {
-        if (!STATE.authChecked) {
-            await ensureAuthorized();
-            updateAuthStatus();
-        }
-
         const res = await supabaseRequest(
             "POST",
             `/${CFG.tableName}`,
@@ -908,10 +892,6 @@
                 attacker_id: 111111111,
                 defender_name: "Test Defender",
                 attacker_name: "Test Attacker",
-                uploader_player_id: STATE.userInfo?.playerId || null,
-                uploader_player_name: STATE.userInfo?.playerName || null,
-                uploader_faction_id: STATE.userInfo?.factionId || null,
-                uploader_faction_name: STATE.userInfo?.factionName || null,
                 loadout: {
                     1: {
                         item_id: 1,
@@ -922,13 +902,14 @@
                         mods: [],
                         bonuses: []
                     }
-                },
-                raw_payload: { test: true, version: SCRIPT_VERSION }
+                }
             }
         );
 
         console.log("[Loadout Loader Test] Insert test:", res);
+        console.log("[Loadout Loader Test] Insert data:", JSON.stringify(res.data, null, 2));
         toast(res.ok ? "Insert worked" : "Insert failed", 5000);
+        return res;
     }
 
     W.testSupabaseInsert = testSupabaseInsert;
@@ -944,7 +925,6 @@
         const hasNative = hasNativeDefenderLoadout(db?.defenderItems);
 
         log("attackData received", {
-            db,
             attackerUser: db?.attackerUser,
             defenderUser: db?.defenderUser,
             defenderItems: db?.defenderItems,
