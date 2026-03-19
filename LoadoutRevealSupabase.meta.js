@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      2.5.3
-// @description  Captures Torn attack data and renders saved loadouts.
+// @version      2.6.0
+// @description  Captures Torn attack data, renders saved loadouts, and shows loadout history.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
