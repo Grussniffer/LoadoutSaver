@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      2.5.3
-// @description  Captures Torn attack data and renders saved loadouts.
+// @version      2.6.0
+// @description  Captures Torn attack data, renders saved loadouts, and shows loadout history.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "2.5.1";
+    const SCRIPT_VERSION = "2.6.0";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -25,6 +25,8 @@
         supabaseUrl: "https://supabase.grusmedia.no:444",
         supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlhdCI6MTc0OTU5MzQ2NiwiZXhwIjoyMDY0OTUzNDY2fQ.Eq_oqn_miVnHoQGO1gbZJQgmonJRAxv7NQRgoWg5Z_Q",
         tableName: "loadouts",
+        historyTableName: "loadout_history",
+        historyLimit: 10,
         store: {
             apiKey: "loadout_loader_api_key",
             quietToasts: "loadout_loader_quiet_mode"
@@ -39,7 +41,10 @@
         authChecked: false,
         isAuthorized: false,
         userInfo: null,
-        authPromise: null
+        authPromise: null,
+        currentRenderedLoadout: null,
+        currentRenderedTimestamp: null,
+        historyOpen: false
     };
 
     function log(...args) {
@@ -106,11 +111,48 @@
             : "just now";
     }
 
+    function stableSortObject(value) {
+        if (Array.isArray(value)) {
+            return value.map(stableSortObject);
+        }
+
+        if (value && typeof value === "object") {
+            return Object.keys(value)
+                .sort((a, b) => {
+                    const na = Number(a);
+                    const nb = Number(b);
+                    const bothNumeric = Number.isFinite(na) && Number.isFinite(nb);
+                    return bothNumeric ? na - nb : a.localeCompare(b);
+                })
+                .reduce((acc, key) => {
+                    acc[key] = stableSortObject(value[key]);
+                    return acc;
+                }, {});
+        }
+
+        return value;
+    }
+
+    function stableStringify(value) {
+        try {
+            return JSON.stringify(stableSortObject(value));
+        } catch {
+            return "";
+        }
+    }
+
     function resetAuthorizationState() {
         STATE.authChecked = false;
         STATE.isAuthorized = false;
         STATE.userInfo = null;
         STATE.authPromise = null;
+    }
+
+    function resetAttackState() {
+        STATE.uploaded = false;
+        STATE.loadoutRendered = false;
+        STATE.currentRenderedLoadout = null;
+        STATE.currentRenderedTimestamp = null;
     }
 
     function supabaseHeaders(extra = {}) {
@@ -396,6 +438,20 @@
         toast(message, duration);
     }
 
+    function currentTargetId() {
+        return extractUserId(STATE.attackData?.defenderUser);
+    }
+
+    function currentTargetName() {
+        return STATE.attackData?.defenderUser?.name || "Unknown";
+    }
+
+    function closeHistoryModal() {
+        const modal = W.document.getElementById("loadout-history-modal");
+        if (modal) modal.remove();
+        STATE.historyOpen = false;
+    }
+
     function createPanel() {
         const host = W.document.createElement("div");
         host.id = "loadout-panel";
@@ -431,7 +487,7 @@
             "top:calc(100% + 4px)",
             "left:100%",
             "transform:translateX(-100%)",
-            "width:320px",
+            "width:340px",
             "z-index:2147483647",
             "border:1px solid rgba(255,255,255,0.16)",
             "background:rgba(10,16,24,0.97)",
@@ -459,6 +515,10 @@
                 Quiet mode (hide routine alerts)
             </label>
             <div id="loadout-auth-status" style="margin-top:10px;color:#b9cfe5;font-size:11px;">Authorization: Not checked</div>
+            <div style="display:flex;gap:6px;margin-top:10px;">
+                <button id="loadout-show-history-btn" style="flex:1;padding:7px 9px;border:none;border-radius:8px;background:#2f5da9;color:#fff;cursor:pointer;">History</button>
+                <button id="loadout-show-latest-btn" style="flex:1;padding:7px 9px;border:none;border-radius:8px;background:#3f7e5f;color:#fff;cursor:pointer;">Show Latest</button>
+            </div>
             <div style="margin-top:10px;color:#6a8aaa;font-size:10px;">Backend: Supabase</div>
         `;
 
@@ -485,6 +545,14 @@
             setLocalStorage(CFG.store.quietToasts, e.target.checked ? "1" : "0");
         };
 
+        panel.querySelector("#loadout-show-history-btn").onclick = () => {
+            showHistoryModal();
+        };
+
+        panel.querySelector("#loadout-show-latest-btn").onclick = () => {
+            fetchAndRenderLoadout(true);
+        };
+
         if (!IS_PDA) {
             const input = panel.querySelector("#loadout-key-input");
 
@@ -503,7 +571,7 @@
 
                 if (ok) {
                     toastInfo("API key saved and authorized.");
-                    fetchAndRenderLoadout();
+                    fetchAndRenderLoadout(true);
                 }
             };
 
@@ -564,28 +632,32 @@
         statusEl.style.color = "#7bcf9a";
     }
 
-    async function fetchAndRenderLoadout() {
-        const authorized = await ensureAuthorized();
-        updateAuthStatus();
-        if (!authorized) return;
-
-        const targetId = extractUserId(STATE.attackData?.defenderUser);
-        if (!targetId) {
-            log("No target ID available for fetch");
-            return;
-        }
-
+    async function getSavedLatestLoadout(targetId) {
         const res = await supabaseRequest(
             "GET",
             `/${CFG.tableName}?defender_id=eq.${encodeURIComponent(targetId)}&select=loadout,inserted_at&limit=1`
         );
 
-        log("Fetched saved loadout", res);
+        log("Fetched saved latest loadout", res);
+        if (!res.ok || !Array.isArray(res.data) || !res.data.length) return null;
+        return res.data[0];
+    }
 
-        if (!res.ok || !Array.isArray(res.data) || !res.data.length) return;
+    async function fetchAndRenderLoadout(force = false) {
+        const authorized = await ensureAuthorized();
+        updateAuthStatus();
+        if (!authorized) return;
 
-        const row = res.data[0];
-        if (row?.loadout) renderLoadout(row.loadout, row.inserted_at);
+        const targetId = currentTargetId();
+        if (!targetId) {
+            log("No target ID available for fetch");
+            return;
+        }
+
+        const row = await getSavedLatestLoadout(targetId);
+        if (row?.loadout) {
+            renderLoadout(row.loadout, row.inserted_at, force);
+        }
     }
 
     function queryFirst(root, selectors) {
@@ -736,26 +808,8 @@
         }
     }
 
-    function hasNativeDefenderLoadout(defenderItems) {
-        if (!defenderItems || typeof defenderItems !== "object") return false;
-
-        return Object.entries(defenderItems).some(([key, slot]) => {
-            const k = Number(key);
-            if (!(k >= 1 && k <= 9)) return false;
-
-            const raw =
-                slot?.item?.[0] ||
-                slot?.item ||
-                slot?.weapon ||
-                slot;
-
-            const itemId = extractItemId(raw);
-            return !!itemId;
-        });
-    }
-
-    function renderLoadout(loadout, inserted) {
-        if (!loadout || STATE.loadoutRendered) return;
+    function renderLoadout(loadout, inserted, force = false) {
+        if (!loadout || (STATE.loadoutRendered && !force)) return;
 
         const waitForDom = W.setInterval(() => {
             const defenderArea = getDefenderArea();
@@ -777,8 +831,9 @@
             for (const { selector, slot, label } of slotMappings) {
                 const marker = defenderArea.querySelector(selector);
                 const wrapper = marker?.closest("[class*='weaponWrapper'], [class*='weapon']");
-                if (wrapper && loadout[slot]) {
-                    renderSlot(wrapper, loadout[slot], label, includeLabel, slot);
+                if (wrapper) {
+                    const item = loadout[slot];
+                    if (item) renderSlot(wrapper, item, label, includeLabel, slot);
                 }
             }
 
@@ -794,13 +849,55 @@
             if (inserted) {
                 const stamp = W.document.getElementById("loadout-timestamp");
                 if (stamp) {
-                    stamp.textContent = `Saved: ${relativeTime(Date.now() - new Date(inserted).getTime())}`;
+                    const timeMs = new Date(inserted).getTime();
+                    stamp.textContent = `Saved: ${Number.isFinite(timeMs) ? relativeTime(Date.now() - timeMs) : inserted}`;
                     stamp.style.display = "inline-flex";
                 }
             }
 
+            STATE.currentRenderedLoadout = loadout;
+            STATE.currentRenderedTimestamp = inserted || null;
             STATE.loadoutRendered = true;
         }, 100);
+    }
+
+    async function saveLoadoutHistoryIfChanged(payload) {
+        const defenderId = payload?.defender_id;
+        const loadout = payload?.loadout;
+        if (!defenderId || !loadout) return;
+
+        const historyRes = await supabaseRequest(
+            "GET",
+            `/${CFG.historyTableName}?defender_id=eq.${encodeURIComponent(defenderId)}&select=loadout,observed_at&order=observed_at.desc&limit=1`
+        );
+
+        let shouldInsert = true;
+
+        if (historyRes.ok && Array.isArray(historyRes.data) && historyRes.data.length) {
+            const latestHistory = historyRes.data[0]?.loadout;
+            shouldInsert = stableStringify(latestHistory) !== stableStringify(loadout);
+        }
+
+        if (!shouldInsert) {
+            log("Skipping history insert because loadout is unchanged");
+            return;
+        }
+
+        const historyPayload = {
+            defender_id: payload.defender_id,
+            attacker_id: payload.attacker_id,
+            defender_name: payload.defender_name,
+            attacker_name: payload.attacker_name,
+            loadout: payload.loadout
+        };
+
+        const historyInsertRes = await supabaseRequest(
+            "POST",
+            `/${CFG.historyTableName}`,
+            historyPayload
+        );
+
+        log("History insert response", historyInsertRes);
     }
 
     async function uploadLoadoutData(raw) {
@@ -814,6 +911,12 @@
         const apiKey = getAPIKey();
         const attackerId = extractUserId(raw?.attackerUser);
         const defenderId = extractUserId(raw?.defenderUser);
+
+        log("uploadLoadoutData called", {
+            attackerUser: raw?.attackerUser,
+            defenderUser: raw?.defenderUser,
+            defenderItems: raw?.defenderItems
+        });
 
         if (!apiKey || !attackerId || !defenderId) {
             log("Upload blocked: missing required IDs", {
@@ -851,10 +954,166 @@
 
         if (res.ok) {
             toastInfo("Defender loadout saved");
+            saveLoadoutHistoryIfChanged(payload).catch(err => log("History save failed", err));
         } else {
             console.error("[Loadout Loader] Supabase upload failed", res);
             toast("Failed to save defender loadout");
         }
+    }
+
+    async function fetchHistoryForCurrentTarget() {
+        const authorized = await ensureAuthorized();
+        updateAuthStatus();
+        if (!authorized) return [];
+
+        const targetId = currentTargetId();
+        if (!targetId) {
+            toast("No defender detected on this page.", 4000);
+            return [];
+        }
+
+        const res = await supabaseRequest(
+            "GET",
+            `/${CFG.historyTableName}?defender_id=eq.${encodeURIComponent(targetId)}&select=id,loadout,observed_at,attacker_name,defender_name&order=observed_at.desc&limit=${CFG.historyLimit}`
+        );
+
+        log("Fetched history rows", res);
+        if (!res.ok || !Array.isArray(res.data)) return [];
+        return res.data;
+    }
+
+    async function showHistoryModal() {
+        if (STATE.historyOpen) {
+            closeHistoryModal();
+            return;
+        }
+
+        const targetId = currentTargetId();
+        const targetName = currentTargetName();
+
+        if (!targetId) {
+            toast("No defender detected on this page.", 4000);
+            return;
+        }
+
+        STATE.historyOpen = true;
+
+        const overlay = W.document.createElement("div");
+        overlay.id = "loadout-history-modal";
+        overlay.style.cssText = [
+            "position:fixed",
+            "inset:0",
+            "background:rgba(0,0,0,0.55)",
+            "z-index:2147483647",
+            "display:flex",
+            "align-items:center",
+            "justify-content:center",
+            "padding:18px"
+        ].join(";");
+
+        const card = W.document.createElement("div");
+        card.style.cssText = [
+            "width:min(520px, 96vw)",
+            "max-height:80vh",
+            "overflow:hidden",
+            "display:flex",
+            "flex-direction:column",
+            "background:rgba(12,18,28,0.98)",
+            "border:1px solid rgba(255,255,255,0.12)",
+            "border-radius:14px",
+            "box-shadow:0 16px 40px rgba(0,0,0,0.42)",
+            "color:#eaf4ff"
+        ].join(";");
+
+        const header = W.document.createElement("div");
+        header.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:14px 14px 10px 14px;border-bottom:1px solid rgba(255,255,255,0.08);";
+        header.innerHTML = `
+            <div>
+                <div style="font-weight:700;font-size:15px;">Loadout History</div>
+                <div style="font-size:12px;color:#9eb4c9;">${escapeHtml(targetName)} [${escapeHtml(targetId)}]</div>
+            </div>
+        `;
+
+        const closeBtn = W.document.createElement("button");
+        closeBtn.textContent = "Close";
+        closeBtn.style.cssText = "padding:7px 10px;border:none;border-radius:8px;background:#6c3f7e;color:#fff;cursor:pointer;";
+        closeBtn.onclick = closeHistoryModal;
+        header.appendChild(closeBtn);
+
+        const body = W.document.createElement("div");
+        body.style.cssText = "padding:12px;overflow:auto;display:flex;flex-direction:column;gap:8px;";
+        body.innerHTML = `<div style="color:#9eb4c9;font-size:12px;">Loading history...</div>`;
+
+        card.appendChild(header);
+        card.appendChild(body);
+        overlay.appendChild(card);
+
+        overlay.addEventListener("click", (e) => {
+            if (e.target === overlay) closeHistoryModal();
+        });
+
+        W.document.body.appendChild(overlay);
+
+        const rows = await fetchHistoryForCurrentTarget();
+
+        if (!STATE.historyOpen) return;
+        body.innerHTML = "";
+
+        if (!rows.length) {
+            body.innerHTML = `<div style="color:#9eb4c9;font-size:12px;">No history found for this defender yet.</div>`;
+            return;
+        }
+
+        rows.forEach((row, index) => {
+            const item = W.document.createElement("div");
+            item.style.cssText = [
+                "border:1px solid rgba(255,255,255,0.10)",
+                "background:rgba(255,255,255,0.03)",
+                "border-radius:10px",
+                "padding:10px",
+                "display:flex",
+                "align-items:center",
+                "justify-content:space-between",
+                "gap:10px"
+            ].join(";");
+
+            const observedAt = row?.observed_at || "";
+            const timeMs = new Date(observedAt).getTime();
+            const timeText = Number.isFinite(timeMs) ? relativeTime(Date.now() - timeMs) : observedAt;
+
+            const meta = W.document.createElement("div");
+            meta.innerHTML = `
+                <div style="font-weight:700;font-size:12px;">Snapshot #${index + 1}</div>
+                <div style="font-size:11px;color:#a8bfd6;">${escapeHtml(timeText)}</div>
+                <div style="font-size:11px;color:#7f97af;">Observed at: ${escapeHtml(observedAt)}</div>
+            `;
+
+            const actions = W.document.createElement("div");
+            actions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;";
+
+            const renderBtn = W.document.createElement("button");
+            renderBtn.textContent = "Render";
+            renderBtn.style.cssText = "padding:6px 9px;border:none;border-radius:8px;background:#2f5da9;color:#fff;cursor:pointer;";
+            renderBtn.onclick = () => {
+                STATE.loadoutRendered = false;
+                renderLoadout(row.loadout, row.observed_at, true);
+                closeHistoryModal();
+            };
+
+            const compareBtn = W.document.createElement("button");
+            compareBtn.textContent = "JSON";
+            compareBtn.style.cssText = "padding:6px 9px;border:none;border-radius:8px;background:#4d5d6b;color:#fff;cursor:pointer;";
+            compareBtn.onclick = () => {
+                W.prompt("Loadout JSON", JSON.stringify(row.loadout, null, 2));
+            };
+
+            actions.appendChild(renderBtn);
+            actions.appendChild(compareBtn);
+
+            item.appendChild(meta);
+            item.appendChild(actions);
+            body.appendChild(item);
+        });
     }
 
     async function testSupabaseConnection() {
@@ -914,28 +1173,68 @@
 
     W.testSupabaseInsert = testSupabaseInsert;
 
+    async function testHistoryInsert() {
+        const res = await supabaseRequest(
+            "POST",
+            `/${CFG.historyTableName}`,
+            {
+                defender_id: 999999999,
+                attacker_id: 111111111,
+                defender_name: "Test Defender",
+                attacker_name: "Test Attacker",
+                loadout: {
+                    1: {
+                        item_id: 1,
+                        item_name: "Test Weapon",
+                        damage: 10,
+                        accuracy: 10,
+                        rarity: "",
+                        mods: [],
+                        bonuses: []
+                    }
+                }
+            }
+        );
+
+        console.log("[Loadout Loader Test] History insert:", res);
+        console.log("[Loadout Loader Test] History insert data:", JSON.stringify(res.data, null, 2));
+        toast(res.ok ? "History insert worked" : "History insert failed", 5000);
+        return res;
+    }
+
+    W.testLoadoutHistoryInsert = testHistoryInsert;
+
     function processResponse(data) {
         if (!data || typeof data !== "object") return;
         if (!data.attackerUser && !data.DB?.attackerUser) return;
 
         const db = data.DB || data;
+        const newDefenderId = extractUserId(db?.defenderUser);
+        const oldDefenderId = extractUserId(STATE.attackData?.defenderUser);
         const isFirstData = !STATE.attackData;
+
+        if (newDefenderId && oldDefenderId && newDefenderId !== oldDefenderId) {
+            resetAttackState();
+        }
+
         STATE.attackData = db;
 
-        const hasNative = hasNativeDefenderLoadout(db?.defenderItems);
+        const extractedLoadout = extractLoadoutFromAttackData(db);
+        const hasLoadout = !!extractedLoadout;
 
         log("attackData received", {
             attackerUser: db?.attackerUser,
             defenderUser: db?.defenderUser,
             defenderItems: db?.defenderItems,
-            hasNative
+            hasLoadout,
+            extractedLoadout
         });
 
-        if (hasNative && !STATE.uploaded) {
+        if (hasLoadout && !STATE.uploaded) {
             STATE.uploaded = true;
             whenVisible(() => uploadLoadoutData(db));
         } else if (isFirstData) {
-            fetchAndRenderLoadout();
+            fetchAndRenderLoadout(true);
         }
     }
 
