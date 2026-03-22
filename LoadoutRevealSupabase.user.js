@@ -158,42 +158,86 @@
         toast(message, duration);
     }
 
-    function apiRequest(method, path, body, { auth = false } = {}) {
-        const url = `${CFG.apiBaseUrl}${path}`;
-        const bridge = W.flutter_inappwebview;
+function apiRequest(method, path, body, { auth = false } = {}) {
+    const url = `${CFG.apiBaseUrl}${path}`;
+    const bridge = W.flutter_inappwebview;
 
-        const headers = {
-            "Content-Type": "application/json"
-        };
+    const headers = {
+        "Content-Type": "application/json"
+    };
 
-        if (auth) {
-            const token = getBackendToken();
-            if (token) headers.Authorization = `Bearer ${token}`;
-        }
+    if (auth) {
+        const token = getBackendToken();
+        if (token) headers.Authorization = `Bearer ${token}`;
 
-        log("API request", { method, url, body, auth });
+        const apiKey = getAPIKey();
+        if (apiKey) headers["X-Torn-Api-Key"] = apiKey;
+    }
 
-        if (bridge?.callHandler) {
-            const handler = method === "GET" ? "PDA_httpGet" : "PDA_httpPost";
-            const call = method === "GET"
-                ? bridge.callHandler(handler, url, headers)
-                : bridge.callHandler(handler, url, headers, body ? JSON.stringify(body) : "");
+    log("API request", { method, url, body, auth });
 
-            return call
-                .then(r => {
+    if (bridge?.callHandler) {
+        const handler = method === "GET" ? "PDA_httpGet" : "PDA_httpPost";
+        const call = method === "GET"
+            ? bridge.callHandler(handler, url, headers)
+            : bridge.callHandler(handler, url, headers, body ? JSON.stringify(body) : "");
+
+        return call
+            .then(r => {
+                const result = {
+                    ok: Number(r?.status || 0) >= 200 && Number(r?.status || 0) < 300,
+                    status: Number(r?.status || 0),
+                    data: parseJson(String(r?.responseText || ""))
+                };
+                log("API response (PDA)", result);
+                return result;
+            })
+            .catch((err) => {
+                log("API PDA request failed", err);
+                return { ok: false, status: 0, data: null };
+            });
+    }
+
+    if (typeof GM_xmlhttpRequest === "function") {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method,
+                url,
+                headers,
+                ...(body ? { data: JSON.stringify(body) } : {}),
+                onload: (r) => {
                     const result = {
-                        ok: Number(r?.status || 0) >= 200 && Number(r?.status || 0) < 300,
-                        status: Number(r?.status || 0),
-                        data: parseJson(String(r?.responseText || ""))
+                        ok: r.status >= 200 && r.status < 300,
+                        status: r.status,
+                        data: parseJson(r.responseText)
                     };
-                    log("API response (PDA)", result);
-                    return result;
-                })
-                .catch((err) => {
-                    log("API PDA request failed", err);
-                    return { ok: false, status: 0, data: null };
-                });
-        }
+                    log("API response (GM)", result);
+                    resolve(result);
+                },
+                onerror: (err) => {
+                    log("API request error (GM)", err);
+                    resolve({ ok: false, status: 0, data: null });
+                },
+                ontimeout: () => {
+                    log("API request timeout (GM)");
+                    resolve({ ok: false, status: 0, data: null });
+                }
+            });
+        });
+    }
+
+    return W.fetch(url, {
+        method,
+        headers,
+        ...(body ? { body: JSON.stringify(body) } : {})
+    })
+        .then(async (r) => ({
+            ok: r.ok,
+            status: r.status,
+            data: parseJson(await r.text())
+        }))
+        .catch(() => ({ ok: false, status: 0, data: null }));
+}
 
         if (typeof GM_xmlhttpRequest === "function") {
             return new Promise((resolve) => {
