@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      3.1.0
+// @version      3.2.0
 // @description  Captures Torn attack data and renders saved loadouts through backend API.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
+// @connect      askelads.grusmedia.no
 // @connect      grusmedia.no
 // @run-at       document-start
 // @downloadURL  https://raw.githubusercontent.com/Grussniffer/LoadoutSaver/main/LoadoutRevealSupabase.user.js
@@ -17,7 +18,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.1.0";
+    const SCRIPT_VERSION = "3.2.0";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -158,86 +159,45 @@
         toast(message, duration);
     }
 
-function apiRequest(method, path, body, { auth = false } = {}) {
-    const url = `${CFG.apiBaseUrl}${path}`;
-    const bridge = W.flutter_inappwebview;
+    function apiRequest(method, path, body, { auth = false } = {}) {
+        const url = `${CFG.apiBaseUrl}${path}`;
+        const bridge = W.flutter_inappwebview;
 
-    const headers = {
-        "Content-Type": "application/json"
-    };
+        const headers = {
+            "Content-Type": "application/json"
+        };
 
-    if (auth) {
-        const token = getBackendToken();
-        if (token) headers.Authorization = `Bearer ${token}`;
+        if (auth) {
+            const token = getBackendToken();
+            if (token) headers.Authorization = `Bearer ${token}`;
 
-        const apiKey = getAPIKey();
-        if (apiKey) headers["X-Torn-Api-Key"] = apiKey;
-    }
+            const apiKey = getAPIKey();
+            if (apiKey) headers["X-Torn-Api-Key"] = apiKey;
+        }
 
-    log("API request", { method, url, body, auth });
+        log("API request", { method, url, body, auth });
 
-    if (bridge?.callHandler) {
-        const handler = method === "GET" ? "PDA_httpGet" : "PDA_httpPost";
-        const call = method === "GET"
-            ? bridge.callHandler(handler, url, headers)
-            : bridge.callHandler(handler, url, headers, body ? JSON.stringify(body) : "");
+        if (bridge?.callHandler) {
+            const handler = method === "GET" ? "PDA_httpGet" : "PDA_httpPost";
+            const call = method === "GET"
+                ? bridge.callHandler(handler, url, headers)
+                : bridge.callHandler(handler, url, headers, body ? JSON.stringify(body) : "");
 
-        return call
-            .then(r => {
-                const result = {
-                    ok: Number(r?.status || 0) >= 200 && Number(r?.status || 0) < 300,
-                    status: Number(r?.status || 0),
-                    data: parseJson(String(r?.responseText || ""))
-                };
-                log("API response (PDA)", result);
-                return result;
-            })
-            .catch((err) => {
-                log("API PDA request failed", err);
-                return { ok: false, status: 0, data: null };
-            });
-    }
-
-    if (typeof GM_xmlhttpRequest === "function") {
-        return new Promise((resolve) => {
-            GM_xmlhttpRequest({
-                method,
-                url,
-                headers,
-                ...(body ? { data: JSON.stringify(body) } : {}),
-                onload: (r) => {
+            return call
+                .then(r => {
                     const result = {
-                        ok: r.status >= 200 && r.status < 300,
-                        status: r.status,
-                        data: parseJson(r.responseText)
+                        ok: Number(r?.status || 0) >= 200 && Number(r?.status || 0) < 300,
+                        status: Number(r?.status || 0),
+                        data: parseJson(String(r?.responseText || ""))
                     };
-                    log("API response (GM)", result);
-                    resolve(result);
-                },
-                onerror: (err) => {
-                    log("API request error (GM)", err);
-                    resolve({ ok: false, status: 0, data: null });
-                },
-                ontimeout: () => {
-                    log("API request timeout (GM)");
-                    resolve({ ok: false, status: 0, data: null });
-                }
-            });
-        });
-    }
-
-    return W.fetch(url, {
-        method,
-        headers,
-        ...(body ? { body: JSON.stringify(body) } : {})
-    })
-        .then(async (r) => ({
-            ok: r.ok,
-            status: r.status,
-            data: parseJson(await r.text())
-        }))
-        .catch(() => ({ ok: false, status: 0, data: null }));
-}
+                    log("API response (PDA)", result);
+                    return result;
+                })
+                .catch((err) => {
+                    log("API PDA request failed", err);
+                    return { ok: false, status: 0, data: null };
+                });
+        }
 
         if (typeof GM_xmlhttpRequest === "function") {
             return new Promise((resolve) => {
@@ -285,12 +245,49 @@ function apiRequest(method, path, body, { auth = false } = {}) {
     }
 
     function extractUserName(user) {
+        if (!user || typeof user !== "object") return null;
+
         return user?.name
             ?? user?.userName
             ?? user?.player_name
             ?? user?.username
             ?? user?.Name
+            ?? user?.fullName
+            ?? user?.displayName
+            ?? user?.user?.name
+            ?? user?.profile?.name
             ?? null;
+    }
+
+    function getTextContent(selectors) {
+        for (const selector of selectors) {
+            try {
+                const el = document.querySelector(selector);
+                const text = el?.textContent?.trim();
+                if (text) return text;
+            } catch {}
+        }
+        return null;
+    }
+
+    function getPageAttackerName() {
+        return getTextContent([
+            "#attacker [class*='name']",
+            "[class*='attacker'] [class*='name']",
+            "[class*='attacker'] [class*='title']",
+            "[class*='playerArea']:first-child [class*='name']",
+            "[class*='playerArea']:first-child a"
+        ]);
+    }
+
+    function getPageDefenderName() {
+        return getTextContent([
+            "#defender [class*='name']",
+            "[class*='defender'] [class*='name']",
+            "[class*='defender'] [class*='title']",
+            "[class*='playerArea']:nth-child(2) [class*='name']",
+            "[class*='playerArea']:nth-child(2) a"
+        ]);
     }
 
     function extractItemId(raw) {
@@ -426,7 +423,7 @@ function apiRequest(method, path, body, { auth = false } = {}) {
     }
 
     function currentTargetName() {
-        return extractUserName(STATE.attackData?.defenderUser) || "Unknown";
+        return extractUserName(STATE.attackData?.defenderUser) || getPageDefenderName() || "Unknown";
     }
 
     async function getLatestLoadout(targetId) {
@@ -654,9 +651,18 @@ function apiRequest(method, path, body, { auth = false } = {}) {
 
         const attackerId = extractUserId(raw?.attackerUser);
         const defenderId = extractUserId(raw?.defenderUser);
-        const attackerName = extractUserName(raw?.attackerUser);
-        const defenderName = extractUserName(raw?.defenderUser);
+        const attackerName = extractUserName(raw?.attackerUser) || getPageAttackerName();
+        const defenderName = extractUserName(raw?.defenderUser) || getPageDefenderName();
         const loadout = extractLoadoutFromAttackData(raw);
+
+        console.log("[Loadout Loader] NAME DEBUG", {
+            rawAttackerUser: raw?.attackerUser,
+            rawDefenderUser: raw?.defenderUser,
+            extractedAttackerName: extractUserName(raw?.attackerUser),
+            extractedDefenderName: extractUserName(raw?.defenderUser),
+            pageAttackerName: getPageAttackerName(),
+            pageDefenderName: getPageDefenderName()
+        });
 
         if (!attackerId || !defenderId || !loadout) {
             log("Skipping report due to missing data", { attackerId, defenderId, attackerName, defenderName, loadout });
@@ -671,7 +677,7 @@ function apiRequest(method, path, body, { auth = false } = {}) {
             loadout
         };
 
-        log("Reporting payload", payload);
+        console.log("[Loadout Loader] REPORT PAYLOAD", payload);
 
         const res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
         log("Report response", res);
@@ -851,6 +857,7 @@ function apiRequest(method, path, body, { auth = false } = {}) {
             <div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:#b9cfe5;font-size:11px;line-height:1.4;">
                 This script uses your <b>Torn Public API key</b> only to identify your player and faction and authenticate with the Loadout backend.
                 It does <b>not</b> require full-access account data.
+                The backend may also use the same key to resolve missing defender names for saved loadout records.
                 You can create or revoke a public key at any time in Torn settings.
             </div>
         `;
@@ -891,7 +898,7 @@ function apiRequest(method, path, body, { auth = false } = {}) {
             "top:calc(100% + 4px)",
             "left:100%",
             "transform:translateX(-100%)",
-            "width:360px",
+            "width:380px",
             "z-index:2147483647",
             "border:1px solid rgba(255,255,255,0.16)",
             "background:rgba(10,16,24,0.97)",
@@ -1065,6 +1072,8 @@ function apiRequest(method, path, body, { auth = false } = {}) {
         if (!data.attackerUser && !data.DB?.attackerUser) return;
 
         const db = data.DB || data;
+        W.attackDataDebug = db;
+
         const newDefenderId = extractUserId(db?.defenderUser);
         const oldDefenderId = extractUserId(STATE.attackData?.defenderUser);
         const isFirstData = !STATE.attackData;
@@ -1082,8 +1091,8 @@ function apiRequest(method, path, body, { auth = false } = {}) {
             attackerUser: db?.attackerUser,
             defenderUser: db?.defenderUser,
             defenderNames: {
-                attacker: extractUserName(db?.attackerUser),
-                defender: extractUserName(db?.defenderUser)
+                attacker: extractUserName(db?.attackerUser) || getPageAttackerName(),
+                defender: extractUserName(db?.defenderUser) || getPageDefenderName()
             },
             defenderItems: db?.defenderItems,
             hasLoadout
