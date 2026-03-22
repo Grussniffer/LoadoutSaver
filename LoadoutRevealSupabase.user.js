@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      3.0.0
+// @version      3.1.0
 // @description  Captures Torn attack data and renders saved loadouts through backend API.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.0.0";
+    const SCRIPT_VERSION = "3.1.0";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -128,6 +128,36 @@
         STATE.loadoutRendered = false;
     }
 
+    function toast(message, duration = 10000) {
+        const host = W.document.getElementById("loadout-toast-host");
+        if (!host) return;
+
+        const el = W.document.createElement("div");
+        el.style.cssText = [
+            "background:rgba(20,24,33,0.94)",
+            "color:#fff",
+            "border:1px solid rgba(255,255,255,0.12)",
+            "border-left:4px solid #ff6b6b",
+            "padding:10px 12px",
+            "border-radius:10px",
+            "font:13px/1.35 'Segoe UI',Tahoma,sans-serif",
+            "box-shadow:0 10px 26px rgba(0,0,0,0.35)"
+        ].join(";");
+
+        el.innerHTML = `
+            <div style="font-weight:700;font-size:11px;color:#a0bcd8;margin-bottom:4px;">Loadout Loader</div>
+            <div>${escapeHtml(message)}</div>
+        `;
+
+        host.appendChild(el);
+        W.setTimeout(() => el.remove(), duration);
+    }
+
+    function toastInfo(message, duration = 2500) {
+        if (getLocalStorage(CFG.store.quietToasts) === "1") return;
+        toast(message, duration);
+    }
+
     function apiRequest(method, path, body, { auth = false } = {}) {
         const url = `${CFG.apiBaseUrl}${path}`;
         const bridge = W.flutter_inappwebview;
@@ -207,7 +237,16 @@
     }
 
     function extractUserId(user) {
-        return user?.userID ?? user?.id ?? user?.player_id ?? null;
+        return user?.userID ?? user?.id ?? user?.player_id ?? user?.ID ?? null;
+    }
+
+    function extractUserName(user) {
+        return user?.name
+            ?? user?.userName
+            ?? user?.player_name
+            ?? user?.username
+            ?? user?.Name
+            ?? null;
     }
 
     function extractItemId(raw) {
@@ -270,42 +309,6 @@
         }
 
         return Object.keys(loadout).length ? loadout : null;
-    }
-
-    function toast(message, duration = 10000) {
-        const host = W.document.getElementById("loadout-toast-host");
-        if (!host) return;
-
-        const el = W.document.createElement("div");
-        el.style.cssText = [
-            "background:rgba(20,24,33,0.94)",
-            "color:#fff",
-            "border:1px solid rgba(255,255,255,0.12)",
-            "border-left:4px solid #ff6b6b",
-            "padding:10px 12px",
-            "border-radius:10px",
-            "font:13px/1.35 'Segoe UI',Tahoma,sans-serif",
-            "box-shadow:0 10px 26px rgba(0,0,0,0.35)"
-        ].join(";");
-
-        el.innerHTML = `
-            <div style="font-weight:700;font-size:11px;color:#a0bcd8;margin-bottom:4px;">Loadout Loader</div>
-            <div>${escapeHtml(message)}</div>
-        `;
-
-        host.appendChild(el);
-        W.setTimeout(() => el.remove(), duration);
-    }
-
-    function toastInfo(message, duration = 2500) {
-        if (getLocalStorage(CFG.store.quietToasts) === "1") return;
-        toast(message, duration);
-    }
-
-    function closeHistoryModal() {
-        const modal = W.document.getElementById("loadout-history-modal");
-        if (modal) modal.remove();
-        STATE.historyOpen = false;
     }
 
     async function validateUserAccess() {
@@ -379,7 +382,7 @@
     }
 
     function currentTargetName() {
-        return STATE.attackData?.defenderUser?.name || "Unknown";
+        return extractUserName(STATE.attackData?.defenderUser) || "Unknown";
     }
 
     async function getLatestLoadout(targetId) {
@@ -607,26 +610,33 @@
 
         const attackerId = extractUserId(raw?.attackerUser);
         const defenderId = extractUserId(raw?.defenderUser);
+        const attackerName = extractUserName(raw?.attackerUser);
+        const defenderName = extractUserName(raw?.defenderUser);
         const loadout = extractLoadoutFromAttackData(raw);
 
         if (!attackerId || !defenderId || !loadout) {
-            log("Skipping report due to missing data", { attackerId, defenderId, loadout });
+            log("Skipping report due to missing data", { attackerId, defenderId, attackerName, defenderName, loadout });
             return;
         }
 
         const payload = {
             defender_id: defenderId,
             attacker_id: attackerId,
-            defender_name: raw?.defenderUser?.name || null,
-            attacker_name: raw?.attackerUser?.name || null,
+            defender_name: defenderName,
+            attacker_name: attackerName,
             loadout
         };
+
+        log("Reporting payload", payload);
 
         const res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
         log("Report response", res);
 
         if (res.ok && res.data?.ok) {
             toastInfo("Defender loadout saved");
+        } else if (res.status === 401) {
+            resetAuthorizationState();
+            toast("Backend session expired. Please save your API key again.", 6000);
         } else {
             toast(res.data?.error || "Failed to save defender loadout");
         }
@@ -646,6 +656,12 @@
         const res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null, { auth: true });
         if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
         return res.data.history;
+    }
+
+    function closeHistoryModal() {
+        const modal = W.document.getElementById("loadout-history-modal");
+        if (modal) modal.remove();
+        STATE.historyOpen = false;
     }
 
     async function showHistoryModal() {
@@ -782,6 +798,20 @@
         });
     }
 
+    function openTornPublicApiKeyPage() {
+        W.open("https://www.torn.com/preferences.php#tab=api", "_blank", "noopener,noreferrer");
+    }
+
+    function getApiKeyHelpHtml() {
+        return `
+            <div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:#b9cfe5;font-size:11px;line-height:1.4;">
+                This script uses your <b>Torn Public API key</b> only to identify your player and faction and authenticate with the Loadout backend.
+                It does <b>not</b> require full-access account data.
+                You can create or revoke a public key at any time in Torn settings.
+            </div>
+        `;
+    }
+
     function createPanel() {
         const host = W.document.createElement("div");
         host.id = "loadout-panel";
@@ -817,7 +847,7 @@
             "top:calc(100% + 4px)",
             "left:100%",
             "transform:translateX(-100%)",
-            "width:340px",
+            "width:360px",
             "z-index:2147483647",
             "border:1px solid rgba(255,255,255,0.16)",
             "background:rgba(10,16,24,0.97)",
@@ -827,15 +857,25 @@
             "box-shadow:0 10px 26px rgba(0,0,0,0.35)"
         ].join(";");
 
+        const savedKey = getAPIKey();
+
         const pdaKeyControls = IS_PDA
-            ? `<div style="margin-bottom:6px;color:#7bcf9a;font-size:11px;">Torn-PDA detected. API key is loaded automatically.</div>`
+            ? `<div style="margin-bottom:6px;color:#7bcf9a;font-size:11px;">Torn-PDA detected. API key is loaded automatically.</div>
+               ${getApiKeyHelpHtml()}`
             : `<div style="margin-bottom:4px;color:#b9cfe5;">Torn API Key (Public)</div>
-               <input id="loadout-key-input" type="password" placeholder="Enter your Torn API key" value="${escapeHtml(getAPIKey())}"
+               <input id="loadout-key-input" type="password" placeholder="Enter your Torn public API key" value="${escapeHtml(savedKey)}"
                  style="width:100%;padding:7px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(2,8,14,0.94);color:#eaf4ff;margin-bottom:8px;box-sizing:border-box;">
-               <div style="display:flex;gap:6px;">
+
+               <div style="display:flex;gap:6px;flex-wrap:wrap;">
                  <button id="loadout-save-btn" style="padding:6px 9px;border:none;border-radius:8px;background:#1e7cdd;color:#fff;cursor:pointer;">Save Key</button>
                  <button id="loadout-clear-btn" style="padding:6px 9px;border:none;border-radius:8px;background:#6c3f7e;color:#fff;cursor:pointer;">Clear Key</button>
-               </div>`;
+                 <button id="loadout-create-public-key-btn" style="padding:6px 9px;border:none;border-radius:8px;background:${savedKey ? "#2f5da9" : "#1f8f55"};color:#fff;cursor:pointer;font-weight:${savedKey ? "400" : "700"};">
+                   ${savedKey ? "Open API Settings" : "Create Public Key"}
+                 </button>
+               </div>
+
+               ${getApiKeyHelpHtml()}`
+        ;
 
         panel.innerHTML = `
             <div style="font-weight:700;margin-bottom:8px;">Loadout Loader - Settings</div>
@@ -911,6 +951,11 @@
                 resetAuthorizationState();
                 updateAuthStatus();
                 toastInfo("API key cleared.");
+            };
+
+            panel.querySelector("#loadout-create-public-key-btn").onclick = () => {
+                openTornPublicApiKeyPage();
+                toastInfo("Opened Torn API settings in a new tab.");
             };
         }
 
@@ -992,6 +1037,10 @@
         log("attackData received", {
             attackerUser: db?.attackerUser,
             defenderUser: db?.defenderUser,
+            defenderNames: {
+                attacker: extractUserName(db?.attackerUser),
+                defender: extractUserName(db?.defenderUser)
+            },
             defenderItems: db?.defenderItems,
             hasLoadout
         });
