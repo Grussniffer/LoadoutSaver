@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      2.6.0
-// @description  Captures Torn attack data, renders saved loadouts, and shows loadout history.
+// @version      3.0.0
+// @description  Captures Torn attack data and renders saved loadouts through backend API.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
-// @connect      supabase.grusmedia.no
+// @connect      grusmedia.no
 // @run-at       document-start
 // @downloadURL  https://raw.githubusercontent.com/Grussniffer/LoadoutSaver/main/LoadoutRevealSupabase.user.js
 // @updateURL    https://raw.githubusercontent.com/Grussniffer/LoadoutSaver/main/LoadoutRevealSupabase.meta.js
@@ -17,18 +17,16 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "2.6.0";
+    const SCRIPT_VERSION = "3.0.0";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
     const CFG = {
-        supabaseUrl: "https://supabase.grusmedia.no:444",
-        supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlhdCI6MTc0OTU5MzQ2NiwiZXhwIjoyMDY0OTUzNDY2fQ.Eq_oqn_miVnHoQGO1gbZJQgmonJRAxv7NQRgoWg5Z_Q",
-        tableName: "loadouts",
-        historyTableName: "loadout_history",
+        apiBaseUrl: "https://askelads.grusmedia.no/loadout-api",
         historyLimit: 10,
         store: {
             apiKey: "loadout_loader_api_key",
+            backendToken: "loadout_loader_backend_token",
             quietToasts: "loadout_loader_quiet_mode"
         },
         debug: true
@@ -42,8 +40,6 @@
         isAuthorized: false,
         userInfo: null,
         authPromise: null,
-        currentRenderedLoadout: null,
-        currentRenderedTimestamp: null,
         historyOpen: false
     };
 
@@ -61,6 +57,14 @@
 
     function getAPIKey() {
         return IS_PDA ? PDA_KEY : getLocalStorage(CFG.store.apiKey);
+    }
+
+    function getBackendToken() {
+        return getLocalStorage(CFG.store.backendToken);
+    }
+
+    function setBackendToken(token) {
+        setLocalStorage(CFG.store.backendToken, token || "");
     }
 
     function parseJson(text) {
@@ -111,68 +115,35 @@
             : "just now";
     }
 
-    function stableSortObject(value) {
-        if (Array.isArray(value)) {
-            return value.map(stableSortObject);
-        }
-
-        if (value && typeof value === "object") {
-            return Object.keys(value)
-                .sort((a, b) => {
-                    const na = Number(a);
-                    const nb = Number(b);
-                    const bothNumeric = Number.isFinite(na) && Number.isFinite(nb);
-                    return bothNumeric ? na - nb : a.localeCompare(b);
-                })
-                .reduce((acc, key) => {
-                    acc[key] = stableSortObject(value[key]);
-                    return acc;
-                }, {});
-        }
-
-        return value;
-    }
-
-    function stableStringify(value) {
-        try {
-            return JSON.stringify(stableSortObject(value));
-        } catch {
-            return "";
-        }
-    }
-
     function resetAuthorizationState() {
         STATE.authChecked = false;
         STATE.isAuthorized = false;
         STATE.userInfo = null;
         STATE.authPromise = null;
+        setBackendToken("");
     }
 
     function resetAttackState() {
         STATE.uploaded = false;
         STATE.loadoutRendered = false;
-        STATE.currentRenderedLoadout = null;
-        STATE.currentRenderedTimestamp = null;
     }
 
-    function supabaseHeaders(extra = {}) {
-        return {
-            apikey: CFG.supabaseAnonKey,
-            Authorization: `Bearer ${CFG.supabaseAnonKey}`,
-            "Content-Type": "application/json",
-            Prefer: "return=representation",
-            ...extra
-        };
-    }
-
-    function supabaseRequest(method, path, body, extraHeaders = {}) {
-        const url = `${CFG.supabaseUrl}/rest/v1${path}`;
+    function apiRequest(method, path, body, { auth = false } = {}) {
+        const url = `${CFG.apiBaseUrl}${path}`;
         const bridge = W.flutter_inappwebview;
 
-        log("Supabase request", { method, url, body });
+        const headers = {
+            "Content-Type": "application/json"
+        };
+
+        if (auth) {
+            const token = getBackendToken();
+            if (token) headers.Authorization = `Bearer ${token}`;
+        }
+
+        log("API request", { method, url, body, auth });
 
         if (bridge?.callHandler) {
-            const headers = supabaseHeaders(extraHeaders);
             const handler = method === "GET" ? "PDA_httpGet" : "PDA_httpPost";
             const call = method === "GET"
                 ? bridge.callHandler(handler, url, headers)
@@ -185,18 +156,17 @@
                         status: Number(r?.status || 0),
                         data: parseJson(String(r?.responseText || ""))
                     };
-                    log("Supabase response (PDA)", result);
+                    log("API response (PDA)", result);
                     return result;
                 })
                 .catch((err) => {
-                    log("Supabase PDA request failed", err);
+                    log("API PDA request failed", err);
                     return { ok: false, status: 0, data: null };
                 });
         }
 
         if (typeof GM_xmlhttpRequest === "function") {
             return new Promise((resolve) => {
-                const headers = supabaseHeaders(extraHeaders);
                 GM_xmlhttpRequest({
                     method,
                     url,
@@ -208,15 +178,15 @@
                             status: r.status,
                             data: parseJson(r.responseText)
                         };
-                        log("Supabase response (GM)", result);
+                        log("API response (GM)", result);
                         resolve(result);
                     },
                     onerror: (err) => {
-                        log("Supabase request error (GM)", err);
+                        log("API request error (GM)", err);
                         resolve({ ok: false, status: 0, data: null });
                     },
                     ontimeout: () => {
-                        log("Supabase request timeout (GM)");
+                        log("API request timeout (GM)");
                         resolve({ ok: false, status: 0, data: null });
                     }
                 });
@@ -225,120 +195,23 @@
 
         return W.fetch(url, {
             method,
-            headers: supabaseHeaders(extraHeaders),
+            headers,
             ...(body ? { body: JSON.stringify(body) } : {})
         })
-            .then(async (r) => {
-                const result = {
-                    ok: r.ok,
-                    status: r.status,
-                    data: parseJson(await r.text())
-                };
-                log("Supabase response (fetch)", result);
-                return result;
-            })
-            .catch((err) => {
-                log("Supabase fetch failed", err);
-                return { ok: false, status: 0, data: null };
-            });
+            .then(async (r) => ({
+                ok: r.ok,
+                status: r.status,
+                data: parseJson(await r.text())
+            }))
+            .catch(() => ({ ok: false, status: 0, data: null }));
     }
 
-    function extractFactionId(profile) {
-        return Number(
-            profile?.faction?.id ??
-            profile?.faction_id ??
-            profile?.faction?.faction_id ??
-            0
-        ) || null;
+    function extractUserId(user) {
+        return user?.userID ?? user?.id ?? user?.player_id ?? null;
     }
 
-    function extractFactionName(profile) {
-        return profile?.faction?.name ?? profile?.faction_name ?? null;
-    }
-
-    async function validateUserAccess() {
-        const apiKey = getAPIKey();
-
-        if (!apiKey) {
-            STATE.authChecked = true;
-            STATE.isAuthorized = false;
-            STATE.userInfo = null;
-            return false;
-        }
-
-        try {
-            const res = await W.fetch(`https://api.torn.com/v2/user/profile?key=${encodeURIComponent(apiKey)}`);
-            const data = await res.json();
-
-            log("Torn profile response", { status: res.status, data });
-
-            if (!res.ok || data?.error) {
-                toast(`Invalid API key: ${data?.error?.error || "Unknown error"}`, 5000);
-                STATE.authChecked = true;
-                STATE.isAuthorized = false;
-                STATE.userInfo = null;
-                return false;
-            }
-
-            const profile = data?.profile || data || {};
-            const playerId = Number(profile?.id || 0) || null;
-            const playerName = profile?.name || null;
-            const factionId = extractFactionId(profile);
-            const factionName = extractFactionName(profile);
-
-            STATE.userInfo = {
-                playerId,
-                playerName,
-                factionId,
-                factionName
-            };
-
-            if (!factionId) {
-                toast("Could not determine your faction from Torn.", 8000);
-                STATE.authChecked = true;
-                STATE.isAuthorized = false;
-                return false;
-            }
-
-            const allowedRes = await supabaseRequest(
-                "GET",
-                `/allowed_factions?faction_id=eq.${encodeURIComponent(factionId)}&is_active=eq.true&select=faction_id,faction_name&limit=1`
-            );
-
-            const allowed = !!(allowedRes.ok && Array.isArray(allowedRes.data) && allowedRes.data.length);
-
-            STATE.authChecked = true;
-            STATE.isAuthorized = allowed;
-
-            log("Authorization result", {
-                allowed,
-                userInfo: STATE.userInfo,
-                allowedRes
-            });
-
-            if (!allowed) {
-                toast("Your faction is not authorized to use this script.", 8000);
-            }
-
-            return allowed;
-        } catch (err) {
-            log("Failed to validate API key", err);
-            toast("Failed to validate API key.", 5000);
-            STATE.authChecked = true;
-            STATE.isAuthorized = false;
-            STATE.userInfo = null;
-            return false;
-        }
-    }
-
-    async function ensureAuthorized() {
-        if (STATE.authChecked) return STATE.isAuthorized;
-        if (!STATE.authPromise) {
-            STATE.authPromise = validateUserAccess().finally(() => {
-                STATE.authPromise = null;
-            });
-        }
-        return STATE.authPromise;
+    function extractItemId(raw) {
+        return raw?.ID ?? raw?.id ?? raw?.item_id ?? raw?.itemID ?? null;
     }
 
     function normalizeMods(mods) {
@@ -357,14 +230,6 @@
             name: b?.name || b?.title || "",
             description: b?.description || b?.desc || ""
         }));
-    }
-
-    function extractItemId(raw) {
-        return raw?.ID ?? raw?.id ?? raw?.item_id ?? raw?.itemID ?? null;
-    }
-
-    function extractUserId(user) {
-        return user?.userID ?? user?.id ?? user?.player_id ?? null;
     }
 
     function extractSlotItem(slotData) {
@@ -404,7 +269,6 @@
             if (parsed) loadout[slot] = parsed;
         }
 
-        log("Extracted loadout", loadout);
         return Object.keys(loadout).length ? loadout : null;
     }
 
@@ -438,170 +302,48 @@
         toast(message, duration);
     }
 
-    function currentTargetId() {
-        return extractUserId(STATE.attackData?.defenderUser);
-    }
-
-    function currentTargetName() {
-        return STATE.attackData?.defenderUser?.name || "Unknown";
-    }
-
     function closeHistoryModal() {
         const modal = W.document.getElementById("loadout-history-modal");
         if (modal) modal.remove();
         STATE.historyOpen = false;
     }
 
-    function createPanel() {
-        const host = W.document.createElement("div");
-        host.id = "loadout-panel";
-        host.style.cssText = [
-            "position:relative",
-            "display:inline-flex",
-            "align-items:center",
-            "gap:8px",
-            "font:12px/1.3 'Segoe UI',Tahoma,sans-serif",
-            "margin-left:8px"
-        ].join(";");
+    async function validateUserAccess() {
+        const apiKey = getAPIKey();
 
-        const btn = W.document.createElement("button");
-        btn.textContent = "Loader Settings";
-        btn.style.cssText = [
-            "border:1px solid rgba(255,255,255,0.16)",
-            "background:rgba(15,23,34,0.96)",
-            "color:#dfefff",
-            "padding:0 10px",
-            "border-radius:8px",
-            "cursor:pointer",
-            "font:11px/1.2 'Segoe UI',Tahoma,sans-serif",
-            "font-weight:700",
-            "height:30px",
-            "box-sizing:border-box"
-        ].join(";");
-
-        const panel = W.document.createElement("div");
-        panel.id = "loadout-panel-inner";
-        panel.style.cssText = [
-            "display:none",
-            "position:absolute",
-            "top:calc(100% + 4px)",
-            "left:100%",
-            "transform:translateX(-100%)",
-            "width:340px",
-            "z-index:2147483647",
-            "border:1px solid rgba(255,255,255,0.16)",
-            "background:rgba(10,16,24,0.97)",
-            "color:#dfefff",
-            "padding:10px",
-            "border-radius:10px",
-            "box-shadow:0 10px 26px rgba(0,0,0,0.35)"
-        ].join(";");
-
-        const pdaKeyControls = IS_PDA
-            ? `<div style="margin-bottom:6px;color:#7bcf9a;font-size:11px;">Torn-PDA detected. API key is loaded automatically.</div>`
-            : `<div style="margin-bottom:4px;color:#b9cfe5;">Torn API Key (Public)</div>
-               <input id="loadout-key-input" type="password" placeholder="Enter your Torn API key" value="${escapeHtml(getAPIKey())}"
-                 style="width:100%;padding:7px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(2,8,14,0.94);color:#eaf4ff;margin-bottom:8px;box-sizing:border-box;">
-               <div style="display:flex;gap:6px;">
-                 <button id="loadout-save-btn" style="padding:6px 9px;border:none;border-radius:8px;background:#1e7cdd;color:#fff;cursor:pointer;">Save Key</button>
-                 <button id="loadout-clear-btn" style="padding:6px 9px;border:none;border-radius:8px;background:#6c3f7e;color:#fff;cursor:pointer;">Clear Key</button>
-               </div>`;
-
-        panel.innerHTML = `
-            <div style="font-weight:700;margin-bottom:8px;">Loadout Loader - Settings</div>
-            ${pdaKeyControls}
-            <label style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer;color:#b9cfe5;font-size:12px;">
-                <input id="loadout-quiet-chk" type="checkbox" ${getLocalStorage(CFG.store.quietToasts) === "1" ? "checked" : ""}>
-                Quiet mode (hide routine alerts)
-            </label>
-            <div id="loadout-auth-status" style="margin-top:10px;color:#b9cfe5;font-size:11px;">Authorization: Not checked</div>
-            <div style="display:flex;gap:6px;margin-top:10px;">
-                <button id="loadout-show-history-btn" style="flex:1;padding:7px 9px;border:none;border-radius:8px;background:#2f5da9;color:#fff;cursor:pointer;">History</button>
-                <button id="loadout-show-latest-btn" style="flex:1;padding:7px 9px;border:none;border-radius:8px;background:#3f7e5f;color:#fff;cursor:pointer;">Show Latest</button>
-            </div>
-            <div style="margin-top:10px;color:#6a8aaa;font-size:10px;">Backend: Supabase</div>
-        `;
-
-        const stamp = W.document.createElement("span");
-        stamp.id = "loadout-timestamp";
-        stamp.style.cssText = [
-            "display:none",
-            "align-items:center",
-            "height:30px",
-            "padding:0 10px",
-            "border-radius:6px",
-            "border:1px solid rgba(255,255,255,0.12)",
-            "background:rgba(0,0,0,0.22)",
-            "color:#d7d7d7",
-            "font-size:11px",
-            "white-space:nowrap"
-        ].join(";");
-
-        btn.onclick = () => {
-            panel.style.display = panel.style.display === "none" ? "block" : "none";
-        };
-
-        panel.querySelector("#loadout-quiet-chk").onchange = (e) => {
-            setLocalStorage(CFG.store.quietToasts, e.target.checked ? "1" : "0");
-        };
-
-        panel.querySelector("#loadout-show-history-btn").onclick = () => {
-            showHistoryModal();
-        };
-
-        panel.querySelector("#loadout-show-latest-btn").onclick = () => {
-            fetchAndRenderLoadout(true);
-        };
-
-        if (!IS_PDA) {
-            const input = panel.querySelector("#loadout-key-input");
-
-            panel.querySelector("#loadout-save-btn").onclick = async () => {
-                const key = input.value.trim();
-                if (!key) {
-                    toast("Please enter a key.", 5000);
-                    return;
-                }
-
-                setLocalStorage(CFG.store.apiKey, key);
-                resetAuthorizationState();
-
-                const ok = await ensureAuthorized();
-                updateAuthStatus();
-
-                if (ok) {
-                    toastInfo("API key saved and authorized.");
-                    fetchAndRenderLoadout(true);
-                }
-            };
-
-            panel.querySelector("#loadout-clear-btn").onclick = () => {
-                input.value = "";
-                setLocalStorage(CFG.store.apiKey, "");
-                resetAuthorizationState();
-                updateAuthStatus();
-                toastInfo("API key cleared.");
-            };
+        if (!apiKey) {
+            STATE.authChecked = true;
+            STATE.isAuthorized = false;
+            STATE.userInfo = null;
+            return false;
         }
 
-        const toastHost = W.document.createElement("div");
-        toastHost.id = "loadout-toast-host";
-        toastHost.style.cssText = [
-            "position:fixed",
-            "top:14px",
-            "right:14px",
-            "z-index:2147483647",
-            "display:flex",
-            "flex-direction:column",
-            "gap:8px",
-            "max-width:320px"
-        ].join(";");
+        const res = await apiRequest("POST", "/api/auth/torn", { apiKey }, { auth: false });
 
-        host.appendChild(btn);
-        host.appendChild(panel);
-        host.appendChild(stamp);
+        if (!res.ok || !res.data?.ok || !res.data?.token) {
+            toast(res.data?.error || "Failed to authenticate with backend", 5000);
+            STATE.authChecked = true;
+            STATE.isAuthorized = false;
+            STATE.userInfo = null;
+            setBackendToken("");
+            return false;
+        }
 
-        return { host, panel, toastHost };
+        setBackendToken(res.data.token);
+        STATE.userInfo = res.data.player || null;
+        STATE.authChecked = true;
+        STATE.isAuthorized = true;
+        return true;
+    }
+
+    async function ensureAuthorized() {
+        if (STATE.authChecked) return STATE.isAuthorized;
+        if (!STATE.authPromise) {
+            STATE.authPromise = validateUserAccess().finally(() => {
+                STATE.authPromise = null;
+            });
+        }
+        return STATE.authPromise;
     }
 
     function updateAuthStatus() {
@@ -621,26 +363,29 @@
         }
 
         if (!STATE.isAuthorized) {
-            const factionText = STATE.userInfo?.factionName ? ` (${STATE.userInfo.factionName})` : "";
+            const factionText = STATE.userInfo?.faction_name ? ` (${STATE.userInfo.faction_name})` : "";
             statusEl.textContent = `Authorization: Denied${factionText}`;
             statusEl.style.color = "#ff8f8f";
             return;
         }
 
-        const factionText = STATE.userInfo?.factionName ? ` (${STATE.userInfo.factionName})` : "";
+        const factionText = STATE.userInfo?.faction_name ? ` (${STATE.userInfo.faction_name})` : "";
         statusEl.textContent = `Authorization: Allowed${factionText}`;
         statusEl.style.color = "#7bcf9a";
     }
 
-    async function getSavedLatestLoadout(targetId) {
-        const res = await supabaseRequest(
-            "GET",
-            `/${CFG.tableName}?defender_id=eq.${encodeURIComponent(targetId)}&select=loadout,inserted_at&limit=1`
-        );
+    function currentTargetId() {
+        return extractUserId(STATE.attackData?.defenderUser);
+    }
 
-        log("Fetched saved latest loadout", res);
-        if (!res.ok || !Array.isArray(res.data) || !res.data.length) return null;
-        return res.data[0];
+    function currentTargetName() {
+        return STATE.attackData?.defenderUser?.name || "Unknown";
+    }
+
+    async function getLatestLoadout(targetId) {
+        const res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
+        if (!res.ok || !res.data?.ok || !res.data?.loadout) return null;
+        return res.data.loadout;
     }
 
     async function fetchAndRenderLoadout(force = false) {
@@ -649,12 +394,9 @@
         if (!authorized) return;
 
         const targetId = currentTargetId();
-        if (!targetId) {
-            log("No target ID available for fetch");
-            return;
-        }
+        if (!targetId) return;
 
-        const row = await getSavedLatestLoadout(targetId);
+        const row = await getLatestLoadout(targetId);
         if (row?.loadout) {
             renderLoadout(row.loadout, row.inserted_at, force);
         }
@@ -831,9 +573,8 @@
             for (const { selector, slot, label } of slotMappings) {
                 const marker = defenderArea.querySelector(selector);
                 const wrapper = marker?.closest("[class*='weaponWrapper'], [class*='weapon']");
-                if (wrapper) {
-                    const item = loadout[slot];
-                    if (item) renderSlot(wrapper, item, label, includeLabel, slot);
+                if (wrapper && loadout[slot]) {
+                    renderSlot(wrapper, loadout[slot], label, includeLabel, slot);
                 }
             }
 
@@ -855,81 +596,21 @@
                 }
             }
 
-            STATE.currentRenderedLoadout = loadout;
-            STATE.currentRenderedTimestamp = inserted || null;
             STATE.loadoutRendered = true;
         }, 100);
     }
 
-    async function saveLoadoutHistoryIfChanged(payload) {
-        const defenderId = payload?.defender_id;
-        const loadout = payload?.loadout;
-        if (!defenderId || !loadout) return;
-
-        const historyRes = await supabaseRequest(
-            "GET",
-            `/${CFG.historyTableName}?defender_id=eq.${encodeURIComponent(defenderId)}&select=loadout,observed_at&order=observed_at.desc&limit=1`
-        );
-
-        let shouldInsert = true;
-
-        if (historyRes.ok && Array.isArray(historyRes.data) && historyRes.data.length) {
-            const latestHistory = historyRes.data[0]?.loadout;
-            shouldInsert = stableStringify(latestHistory) !== stableStringify(loadout);
-        }
-
-        if (!shouldInsert) {
-            log("Skipping history insert because loadout is unchanged");
-            return;
-        }
-
-        const historyPayload = {
-            defender_id: payload.defender_id,
-            attacker_id: payload.attacker_id,
-            defender_name: payload.defender_name,
-            attacker_name: payload.attacker_name,
-            loadout: payload.loadout
-        };
-
-        const historyInsertRes = await supabaseRequest(
-            "POST",
-            `/${CFG.historyTableName}`,
-            historyPayload
-        );
-
-        log("History insert response", historyInsertRes);
-    }
-
-    async function uploadLoadoutData(raw) {
+    async function reportLoadout(raw) {
         const authorized = await ensureAuthorized();
         updateAuthStatus();
-        if (!authorized) {
-            log("Upload blocked: not authorized");
-            return;
-        }
+        if (!authorized) return;
 
-        const apiKey = getAPIKey();
         const attackerId = extractUserId(raw?.attackerUser);
         const defenderId = extractUserId(raw?.defenderUser);
-
-        log("uploadLoadoutData called", {
-            attackerUser: raw?.attackerUser,
-            defenderUser: raw?.defenderUser,
-            defenderItems: raw?.defenderItems
-        });
-
-        if (!apiKey || !attackerId || !defenderId) {
-            log("Upload blocked: missing required IDs", {
-                hasApiKey: !!apiKey,
-                attackerUser: raw?.attackerUser,
-                defenderUser: raw?.defenderUser
-            });
-            return;
-        }
-
         const loadout = extractLoadoutFromAttackData(raw);
-        if (!loadout) {
-            log("Upload blocked: no loadout extracted", raw?.defenderItems);
+
+        if (!attackerId || !defenderId || !loadout) {
+            log("Skipping report due to missing data", { attackerId, defenderId, loadout });
             return;
         }
 
@@ -941,23 +622,13 @@
             loadout
         };
 
-        log("Uploading loadout payload", payload);
+        const res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
+        log("Report response", res);
 
-        const res = await supabaseRequest(
-            "POST",
-            `/${CFG.tableName}?on_conflict=defender_id`,
-            payload,
-            { Prefer: "resolution=merge-duplicates,return=representation" }
-        );
-
-        log("Upload response", res);
-
-        if (res.ok) {
+        if (res.ok && res.data?.ok) {
             toastInfo("Defender loadout saved");
-            saveLoadoutHistoryIfChanged(payload).catch(err => log("History save failed", err));
         } else {
-            console.error("[Loadout Loader] Supabase upload failed", res);
-            toast("Failed to save defender loadout");
+            toast(res.data?.error || "Failed to save defender loadout");
         }
     }
 
@@ -972,14 +643,9 @@
             return [];
         }
 
-        const res = await supabaseRequest(
-            "GET",
-            `/${CFG.historyTableName}?defender_id=eq.${encodeURIComponent(targetId)}&select=id,loadout,observed_at,attacker_name,defender_name&order=observed_at.desc&limit=${CFG.historyLimit}`
-        );
-
-        log("Fetched history rows", res);
-        if (!res.ok || !Array.isArray(res.data)) return [];
-        return res.data;
+        const res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null, { auth: true });
+        if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
+        return res.data.history;
     }
 
     async function showHistoryModal() {
@@ -1100,15 +766,15 @@
                 closeHistoryModal();
             };
 
-            const compareBtn = W.document.createElement("button");
-            compareBtn.textContent = "JSON";
-            compareBtn.style.cssText = "padding:6px 9px;border:none;border-radius:8px;background:#4d5d6b;color:#fff;cursor:pointer;";
-            compareBtn.onclick = () => {
+            const jsonBtn = W.document.createElement("button");
+            jsonBtn.textContent = "JSON";
+            jsonBtn.style.cssText = "padding:6px 9px;border:none;border-radius:8px;background:#4d5d6b;color:#fff;cursor:pointer;";
+            jsonBtn.onclick = () => {
                 W.prompt("Loadout JSON", JSON.stringify(row.loadout, null, 2));
             };
 
             actions.appendChild(renderBtn);
-            actions.appendChild(compareBtn);
+            actions.appendChild(jsonBtn);
 
             item.appendChild(meta);
             item.appendChild(actions);
@@ -1116,93 +782,194 @@
         });
     }
 
-    async function testSupabaseConnection() {
-        const res = await supabaseRequest(
-            "GET",
-            `/${CFG.tableName}?select=defender_id,inserted_at&limit=1`
-        );
+    function createPanel() {
+        const host = W.document.createElement("div");
+        host.id = "loadout-panel";
+        host.style.cssText = [
+            "position:relative",
+            "display:inline-flex",
+            "align-items:center",
+            "gap:8px",
+            "font:12px/1.3 'Segoe UI',Tahoma,sans-serif",
+            "margin-left:8px"
+        ].join(";");
 
-        console.log("[Loadout Loader Test] Supabase test response:", res);
-        console.log("[Loadout Loader Test] Supabase test data:", JSON.stringify(res.data, null, 2));
-        toast(res.ok ? "Supabase reachable" : "Supabase NOT reachable", 5000);
-        return res;
+        const btn = W.document.createElement("button");
+        btn.textContent = "Loader Settings";
+        btn.style.cssText = [
+            "border:1px solid rgba(255,255,255,0.16)",
+            "background:rgba(15,23,34,0.96)",
+            "color:#dfefff",
+            "padding:0 10px",
+            "border-radius:8px",
+            "cursor:pointer",
+            "font:11px/1.2 'Segoe UI',Tahoma,sans-serif",
+            "font-weight:700",
+            "height:30px",
+            "box-sizing:border-box"
+        ].join(";");
+
+        const panel = W.document.createElement("div");
+        panel.id = "loadout-panel-inner";
+        panel.style.cssText = [
+            "display:none",
+            "position:absolute",
+            "top:calc(100% + 4px)",
+            "left:100%",
+            "transform:translateX(-100%)",
+            "width:340px",
+            "z-index:2147483647",
+            "border:1px solid rgba(255,255,255,0.16)",
+            "background:rgba(10,16,24,0.97)",
+            "color:#dfefff",
+            "padding:10px",
+            "border-radius:10px",
+            "box-shadow:0 10px 26px rgba(0,0,0,0.35)"
+        ].join(";");
+
+        const pdaKeyControls = IS_PDA
+            ? `<div style="margin-bottom:6px;color:#7bcf9a;font-size:11px;">Torn-PDA detected. API key is loaded automatically.</div>`
+            : `<div style="margin-bottom:4px;color:#b9cfe5;">Torn API Key (Public)</div>
+               <input id="loadout-key-input" type="password" placeholder="Enter your Torn API key" value="${escapeHtml(getAPIKey())}"
+                 style="width:100%;padding:7px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(2,8,14,0.94);color:#eaf4ff;margin-bottom:8px;box-sizing:border-box;">
+               <div style="display:flex;gap:6px;">
+                 <button id="loadout-save-btn" style="padding:6px 9px;border:none;border-radius:8px;background:#1e7cdd;color:#fff;cursor:pointer;">Save Key</button>
+                 <button id="loadout-clear-btn" style="padding:6px 9px;border:none;border-radius:8px;background:#6c3f7e;color:#fff;cursor:pointer;">Clear Key</button>
+               </div>`;
+
+        panel.innerHTML = `
+            <div style="font-weight:700;margin-bottom:8px;">Loadout Loader - Settings</div>
+            ${pdaKeyControls}
+            <label style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer;color:#b9cfe5;font-size:12px;">
+                <input id="loadout-quiet-chk" type="checkbox" ${getLocalStorage(CFG.store.quietToasts) === "1" ? "checked" : ""}>
+                Quiet mode (hide routine alerts)
+            </label>
+            <div id="loadout-auth-status" style="margin-top:10px;color:#b9cfe5;font-size:11px;">Authorization: Not checked</div>
+            <div style="display:flex;gap:6px;margin-top:10px;">
+                <button id="loadout-show-history-btn" style="flex:1;padding:7px 9px;border:none;border-radius:8px;background:#2f5da9;color:#fff;cursor:pointer;">History</button>
+                <button id="loadout-show-latest-btn" style="flex:1;padding:7px 9px;border:none;border-radius:8px;background:#3f7e5f;color:#fff;cursor:pointer;">Show Latest</button>
+            </div>
+            <div style="margin-top:10px;color:#6a8aaa;font-size:10px;">Backend: API</div>
+        `;
+
+        const stamp = W.document.createElement("span");
+        stamp.id = "loadout-timestamp";
+        stamp.style.cssText = [
+            "display:none",
+            "align-items:center",
+            "height:30px",
+            "padding:0 10px",
+            "border-radius:6px",
+            "border:1px solid rgba(255,255,255,0.12)",
+            "background:rgba(0,0,0,0.22)",
+            "color:#d7d7d7",
+            "font-size:11px",
+            "white-space:nowrap"
+        ].join(";");
+
+        btn.onclick = () => {
+            panel.style.display = panel.style.display === "none" ? "block" : "none";
+        };
+
+        panel.querySelector("#loadout-quiet-chk").onchange = (e) => {
+            setLocalStorage(CFG.store.quietToasts, e.target.checked ? "1" : "0");
+        };
+
+        panel.querySelector("#loadout-show-history-btn").onclick = () => {
+            showHistoryModal();
+        };
+
+        panel.querySelector("#loadout-show-latest-btn").onclick = () => {
+            fetchAndRenderLoadout(true);
+        };
+
+        if (!IS_PDA) {
+            const input = panel.querySelector("#loadout-key-input");
+
+            panel.querySelector("#loadout-save-btn").onclick = async () => {
+                const key = input.value.trim();
+                if (!key) {
+                    toast("Please enter a key.", 5000);
+                    return;
+                }
+
+                setLocalStorage(CFG.store.apiKey, key);
+                resetAuthorizationState();
+
+                const ok = await ensureAuthorized();
+                updateAuthStatus();
+
+                if (ok) {
+                    toastInfo("API key saved and authorized.");
+                    fetchAndRenderLoadout(true);
+                }
+            };
+
+            panel.querySelector("#loadout-clear-btn").onclick = () => {
+                input.value = "";
+                setLocalStorage(CFG.store.apiKey, "");
+                resetAuthorizationState();
+                updateAuthStatus();
+                toastInfo("API key cleared.");
+            };
+        }
+
+        const toastHost = W.document.createElement("div");
+        toastHost.id = "loadout-toast-host";
+        toastHost.style.cssText = [
+            "position:fixed",
+            "top:14px",
+            "right:14px",
+            "z-index:2147483647",
+            "display:flex",
+            "flex-direction:column",
+            "gap:8px",
+            "max-width:320px"
+        ].join(";");
+
+        host.appendChild(btn);
+        host.appendChild(panel);
+        host.appendChild(stamp);
+
+        return { host, panel, toastHost };
     }
 
-    W.testSupabaseConnection = testSupabaseConnection;
-
-    async function testAuthorization() {
+    async function testBackendAuth() {
         resetAuthorizationState();
         const ok = await ensureAuthorized();
         updateAuthStatus();
-        const result = { ok, userInfo: STATE.userInfo };
-        console.log("[Loadout Loader Test] Authorization:", result);
-        toast(ok ? "Authorization successful" : "Authorization failed", 5000);
-        return result;
+        console.log("[Loadout Loader Test] Backend auth:", { ok, userInfo: STATE.userInfo, token: getBackendToken() });
+        toast(ok ? "Backend auth successful" : "Backend auth failed", 5000);
+        return ok;
     }
 
-    W.testLoadoutAuthorization = testAuthorization;
+    W.testBackendAuth = testBackendAuth;
 
-    async function testSupabaseInsert() {
-        const res = await supabaseRequest(
-            "POST",
-            `/${CFG.tableName}`,
-            {
-                defender_id: 999999999,
-                attacker_id: 111111111,
-                defender_name: "Test Defender",
-                attacker_name: "Test Attacker",
-                loadout: {
-                    1: {
-                        item_id: 1,
-                        item_name: "Test Weapon",
-                        damage: 10,
-                        accuracy: 10,
-                        rarity: "",
-                        mods: [],
-                        bonuses: []
-                    }
-                }
-            }
-        );
-
-        console.log("[Loadout Loader Test] Insert test:", res);
-        console.log("[Loadout Loader Test] Insert data:", JSON.stringify(res.data, null, 2));
-        toast(res.ok ? "Insert worked" : "Insert failed", 5000);
+    async function testBackendLatest() {
+        const targetId = currentTargetId();
+        if (!targetId) {
+            toast("No defender detected", 4000);
+            return null;
+        }
+        const res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
+        console.log("[Loadout Loader Test] Latest:", res);
         return res;
     }
 
-    W.testSupabaseInsert = testSupabaseInsert;
+    W.testBackendLatest = testBackendLatest;
 
-    async function testHistoryInsert() {
-        const res = await supabaseRequest(
-            "POST",
-            `/${CFG.historyTableName}`,
-            {
-                defender_id: 999999999,
-                attacker_id: 111111111,
-                defender_name: "Test Defender",
-                attacker_name: "Test Attacker",
-                loadout: {
-                    1: {
-                        item_id: 1,
-                        item_name: "Test Weapon",
-                        damage: 10,
-                        accuracy: 10,
-                        rarity: "",
-                        mods: [],
-                        bonuses: []
-                    }
-                }
-            }
-        );
-
-        console.log("[Loadout Loader Test] History insert:", res);
-        console.log("[Loadout Loader Test] History insert data:", JSON.stringify(res.data, null, 2));
-        toast(res.ok ? "History insert worked" : "History insert failed", 5000);
+    async function testBackendHistory() {
+        const targetId = currentTargetId();
+        if (!targetId) {
+            toast("No defender detected", 4000);
+            return null;
+        }
+        const res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=5`, null, { auth: true });
+        console.log("[Loadout Loader Test] History:", res);
         return res;
     }
 
-    W.testLoadoutHistoryInsert = testHistoryInsert;
+    W.testBackendHistory = testBackendHistory;
 
     function processResponse(data) {
         if (!data || typeof data !== "object") return;
@@ -1226,13 +993,12 @@
             attackerUser: db?.attackerUser,
             defenderUser: db?.defenderUser,
             defenderItems: db?.defenderItems,
-            hasLoadout,
-            extractedLoadout
+            hasLoadout
         });
 
         if (hasLoadout && !STATE.uploaded) {
             STATE.uploaded = true;
-            whenVisible(() => uploadLoadoutData(db));
+            whenVisible(() => reportLoadout(db));
         } else if (isFirstData) {
             fetchAndRenderLoadout(true);
         }
