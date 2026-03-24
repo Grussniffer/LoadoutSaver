@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.4.0
+// @version      3.5.0
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.4.0";
+    const SCRIPT_VERSION = "3.5.0";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -735,6 +735,7 @@
         const defenderId = extractUserId(raw?.defenderUser);
         const attackerName = extractUserName(raw?.attackerUser) || getPageAttackerName();
         const defenderName = extractUserName(raw?.defenderUser) || getPageDefenderName();
+        const defenderFactionId = raw?.defenderUser?.factionID ?? null;
         const loadout = extractLoadoutFromAttackData(raw);
 
         if (!attackerId || !defenderId || !loadout) {
@@ -746,6 +747,7 @@
             attacker_id: attackerId,
             defender_name: defenderName,
             attacker_name: attackerName,
+            defender_faction_id: defenderFactionId,
             loadout
         };
 
@@ -908,6 +910,7 @@
                 <div style="font-weight:700;font-size:12px;color:#f4e7c2;">Snapshot #${index + 1}</div>
                 <div style="font-size:11px;color:#c9b892;">${escapeHtml(timeText)}</div>
                 <div style="font-size:11px;color:#a99a82;">Observed at: ${escapeHtml(observedAt)}</div>
+                <div style="font-size:11px;color:#a99a82;">Defender faction: ${escapeHtml(row?.defender_faction_id ?? "Unknown")}</div>
             `;
 
             const actions = W.document.createElement("div");
