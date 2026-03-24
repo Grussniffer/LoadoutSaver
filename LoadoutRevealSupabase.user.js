@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         Loadout Loader
 // @namespace    loadout.loader
-// @version      3.2.0
+// @version      3.3.0
 // @description  Captures Torn attack data and renders saved loadouts through backend API.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      askelads.grusmedia.no
-// @connect      grusmedia.no
 // @run-at       document-start
 // @downloadURL  https://raw.githubusercontent.com/Grussniffer/LoadoutSaver/main/LoadoutRevealSupabase.user.js
 // @updateURL    https://raw.githubusercontent.com/Grussniffer/LoadoutSaver/main/LoadoutRevealSupabase.meta.js
@@ -18,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.2.0";
+    const SCRIPT_VERSION = "3.3.0";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -116,6 +115,26 @@
             : "just now";
     }
 
+    function waitForElement(selector, callback, timeout = 15000) {
+        const found = W.document.querySelector(selector);
+        if (found) {
+            callback(found);
+            return;
+        }
+
+        const obs = new MutationObserver(() => {
+            const el = W.document.querySelector(selector);
+            if (el) {
+                obs.disconnect();
+                W.clearTimeout(timer);
+                callback(el);
+            }
+        });
+
+        obs.observe(W.document.documentElement, { childList: true, subtree: true });
+        const timer = W.setTimeout(() => obs.disconnect(), timeout);
+    }
+
     function resetAuthorizationState() {
         STATE.authChecked = false;
         STATE.isAuthorized = false;
@@ -127,6 +146,11 @@
     function resetAttackState() {
         STATE.uploaded = false;
         STATE.loadoutRendered = false;
+        cleanupScriptOverlays();
+    }
+
+    function cleanupScriptOverlays() {
+        W.document.querySelectorAll(".ll-slot-overlay, .ll-armor-overlay, .ll-armor-map").forEach(el => el.remove());
     }
 
     function toast(message, duration = 10000) {
@@ -164,7 +188,8 @@
         const bridge = W.flutter_inappwebview;
 
         const headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "X-Script-Version": SCRIPT_VERSION
         };
 
         if (auth) {
@@ -246,8 +271,8 @@
 
     function extractUserName(user) {
         if (!user || typeof user !== "object") return null;
-
-        return user?.name
+        return user?.playername
+            ?? user?.name
             ?? user?.userName
             ?? user?.player_name
             ?? user?.username
@@ -262,7 +287,7 @@
     function getTextContent(selectors) {
         for (const selector of selectors) {
             try {
-                const el = document.querySelector(selector);
+                const el = W.document.querySelector(selector);
                 const text = el?.textContent?.trim();
                 if (text) return text;
             } catch {}
@@ -295,21 +320,43 @@
     }
 
     function normalizeMods(mods) {
-        if (!Array.isArray(mods)) return [];
-        return mods.map(m => ({
-            icon: m?.icon || m?.key || m?.type || null,
-            name: m?.name || m?.title || "",
-            description: m?.description || m?.desc || ""
+        if (!mods) return [];
+        const arr = Array.isArray(mods) ? mods : Object.values(mods);
+
+        return arr.map(m => ({
+            icon: m?.icon || m?.key || m?.type || m?.name || null,
+            name: m?.title || m?.name || m?.label || "",
+            description: m?.desc || m?.description || m?.text || m?.hoverover || ""
         }));
     }
 
     function normalizeBonuses(bonuses) {
-        if (!Array.isArray(bonuses)) return [];
-        return bonuses.map(b => ({
-            bonus_key: b?.bonus_key || b?.key || b?.icon || null,
-            name: b?.name || b?.title || "",
-            description: b?.description || b?.desc || ""
+        if (!bonuses) return [];
+        const arr = Array.isArray(bonuses)
+            ? bonuses
+            : Object.entries(bonuses).map(([key, value]) => ({
+                bonus_key: key,
+                ...(value || {})
+            }));
+
+        return arr.map(b => ({
+            bonus_key: b?.bonus_key || b?.key || b?.icon || b?.type || b?.title || null,
+            name: b?.title || b?.name || b?.label || "",
+            description: b?.desc || b?.description || b?.text || b?.hoverover || ""
         }));
+    }
+
+    function mapGlowClassToRarity(glowClass) {
+        const value = String(glowClass || "").toLowerCase();
+        if (value.includes("yellow")) return "yellow";
+        if (value.includes("orange")) return "orange";
+        if (value.includes("red")) return "red";
+        return "";
+    }
+
+    function extractAmmoType(raw) {
+        const ammo = raw?.ammotype ?? raw?.ammo_type ?? raw?.ammoType ?? null;
+        return ammo == null ? null : String(ammo);
     }
 
     function extractSlotItem(slotData) {
@@ -329,11 +376,12 @@
         return {
             item_id: itemId,
             item_name: raw?.name || raw?.item_name || raw?.itemName || "Unknown",
-            damage: raw?.damage ?? raw?.Damage ?? raw?.displayDamage ?? null,
-            accuracy: raw?.accuracy ?? raw?.Accuracy ?? raw?.displayAccuracy ?? null,
-            rarity: String(raw?.rarity || raw?.Rarity || "").toLowerCase(),
-            mods: normalizeMods(slotData?.mods || raw?.mods || raw?.attachments || []),
-            bonuses: normalizeBonuses(slotData?.bonuses || raw?.bonuses || [])
+            damage: raw?.dmg != null ? Number(raw.dmg) : raw?.damage != null ? Number(raw.damage) : null,
+            accuracy: raw?.acc != null ? Number(raw.acc) : raw?.accuracy != null ? Number(raw.accuracy) : null,
+            rarity: mapGlowClassToRarity(raw?.glowClass || raw?.rarity || ""),
+            ammo_type: extractAmmoType(raw),
+            mods: normalizeMods(raw?.currentUpgrades || raw?.mods || raw?.attachments || []),
+            bonuses: normalizeBonuses(raw?.currentBonuses || raw?.bonuses || [])
         };
     }
 
@@ -491,6 +539,15 @@
     function renderSlot(wrapper, item, slotLabel, includeLabel = true, slot = 0) {
         if (!wrapper || !item) return;
 
+        wrapper.querySelector(".ll-slot-overlay")?.remove();
+
+        const overlay = wrapper.cloneNode(true);
+        overlay.classList.add("ll-slot-overlay");
+        overlay.style.cssText += ";position:absolute;top:0;left:0;width:100%;height:100%;z-index:10;box-sizing:border-box;";
+        wrapper.style.position = "relative";
+        wrapper.appendChild(overlay);
+        wrapper = overlay;
+
         const rarityGlow = {
             yellow: "glow-yellow",
             orange: "glow-orange",
@@ -498,11 +555,7 @@
         };
 
         const glow = rarityGlow[item.rarity] || "glow-default";
-        wrapper.className = wrapper.className
-            .split(/\s+/)
-            .filter(c => c && !/^glow-/.test(c))
-            .join(" ");
-
+        wrapper.classList.remove(...[...wrapper.classList].filter(c => /^glow-/.test(c)));
         wrapper.classList.add(glow);
 
         const border = queryFirst(wrapper, ["[class*='itemBorder']"]);
@@ -533,11 +586,14 @@
 
         const bottom = queryFirst(wrapper, ["[class*='bottom___']"]);
         if (bottom) {
+            const ammoColorKey = (item.ammo_type || "").toLowerCase().replace(/\s+/g, "-");
+            const ammoColor = `var(--attack-ammo-color-${ammoColorKey}, #ddd)`;
+
             const ammoInner = slot === 3
                 ? INFINITY_SVG
                 : slot === 5
                     ? `<span class="markerText___HdlDL standard___bW8M5">1</span>`
-                    : `<span class="markerText___HdlDL">Unknown</span>`;
+                    : `<span class="markerText___HdlDL" style="color:${ammoColor}">${escapeHtml(item.ammo_type || "Unknown")}</span>`;
 
             bottom.innerHTML = `
                 <div class="props___oL_Cw">
@@ -551,26 +607,31 @@
                 </div>`;
         }
 
-        let xp = wrapper.querySelector(".tt-weapon-experience");
-        if (!xp) {
-            xp = W.document.createElement("div");
-            xp.className = "tt-weapon-experience";
-            wrapper.appendChild(xp);
+        let weaponName = wrapper.querySelector(".ll-weapon-name");
+        if (!weaponName) {
+            weaponName = W.document.createElement("div");
+            weaponName.className = "ll-weapon-name";
+            weaponName.style.cssText = "position:absolute;top:16px;left:9px;font-size:10px;color:#00a500;";
+            wrapper.appendChild(weaponName);
         }
 
-        xp.textContent = item.item_name || "";
+        weaponName.textContent = item.item_name || "";
         wrapper.setAttribute("aria-label", item.item_name || "Unknown");
     }
 
     function renderArmor(defenderArea, loadout) {
         const modelLayers = queryFirst(defenderArea, ["[class*='modelLayers']"]);
-        const armorWrap = modelLayers ? queryFirst(modelLayers, ["[class*='armoursWrap']"]) : null;
-        if (!armorWrap) return;
+        if (!modelLayers) return;
 
-        armorWrap.innerHTML = "";
-        armorWrap.style.cssText = `position:absolute;inset:0;pointer-events:none;z-index:4;transform:translateY(${IS_PDA ? "10px" : "20px"});`;
+        modelLayers.querySelector(".ll-armor-overlay")?.remove();
+        W.document.querySelector(".ll-armor-map")?.remove();
+
+        const armorOverlay = W.document.createElement("div");
+        armorOverlay.className = "ll-armor-overlay ll-slot-overlay";
+        armorOverlay.style.cssText = `position:absolute;inset:0;pointer-events:none;z-index:4;transform:translateY(${IS_PDA ? "10px" : "20px"});`;
 
         const layerOrder = { 8: 10, 7: 11, 9: 12, 6: 13, 4: 14 };
+        const frag = W.document.createDocumentFragment();
 
         for (const slot of [8, 7, 9, 6, 4]) {
             const item = loadout[slot];
@@ -590,18 +651,60 @@
 
             armor.appendChild(img);
             container.appendChild(armor);
-            armorWrap.appendChild(container);
+            frag.appendChild(container);
         }
+
+        armorOverlay.appendChild(frag);
+        modelLayers.appendChild(armorOverlay);
+
+        const bodyImg = queryFirst(defenderArea, ["[class*='bodyImage']", "img[src*='model']"]);
+        if (!bodyImg) return;
+
+        const MAP_NAME = "ll-armor-map";
+        const slotAreas = {
+            4: [{ coords: "119,79,99,73,80,96,62,131,54,150,52,167,62,169,79,138,91,118,99,142,95,159,143,161,144,143,148,118,162,141,174,166,187,165,176,129,162,95,140,75" }],
+            6: [{ coords: "118,77,104,67,99,52,104,36,118,26,132,32,136,51,133,69" }],
+            7: [{ coords: "94,162,145,162,157,204,154,239,150,261,156,275,150,301,136,303,131,283,121,209,109,284,105,300,89,299,85,276,87,257,84,236,85,201" }],
+            8: [
+                { coords: "87,300,89,322,86,336,78,349,88,354,99,354,104,340,106,325,105,302" },
+                { coords: "136,304,153,300,151,318,153,330,160,343,153,352,138,353,132,330" }
+            ],
+            9: [
+                { coords: "48,203,55,192,62,195,67,192,61,172,50,169,44,183,40,203" },
+                { coords: "175,171,189,170,196,185,198,200,191,202,184,191,177,196,176,180" }
+            ]
+        };
+
+        const map = W.document.createElement("map");
+        map.name = MAP_NAME;
+        map.className = "ll-armor-map ll-slot-overlay";
+
+        for (const slot of [4, 6, 7, 8, 9]) {
+            const item = loadout[slot];
+            if (!item || !slotAreas[slot]) continue;
+
+            for (const { coords } of slotAreas[slot]) {
+                const area = W.document.createElement("area");
+                area.shape = "poly";
+                area.coords = coords;
+                area.alt = item.item_name || "";
+                area.title = item.item_name || "";
+                map.appendChild(area);
+            }
+        }
+
+        bodyImg.parentNode.appendChild(map);
+        bodyImg.setAttribute("usemap", `#${MAP_NAME}`);
     }
 
     function renderLoadout(loadout, inserted, force = false) {
-        if (!loadout || (STATE.loadoutRendered && !force)) return;
+        if (!loadout || (STATE.loadoutRendered && !force) || STATE.attackData?.fightID) return;
 
-        const waitForDom = W.setInterval(() => {
+        waitForElement("#defender_Primary, #defender_Secondary, #defender_Melee, #defender_Temporary, #attacker_Primary, [class*='playerArea']", () => {
             const defenderArea = getDefenderArea();
             if (!defenderArea) return;
 
-            W.clearInterval(waitForDom);
+            cleanupScriptOverlays();
 
             const hasDefender = !!defenderArea.querySelector("#defender_Primary");
             const hasAttacker = !!defenderArea.querySelector("#attacker_Primary");
@@ -629,6 +732,7 @@
                 modal.style.background = "transparent";
                 modal.style.backdropFilter = "none";
                 modal.style.webkitBackdropFilter = "none";
+                modal.style.pointerEvents = "none";
             }
 
             if (inserted) {
@@ -641,7 +745,7 @@
             }
 
             STATE.loadoutRendered = true;
-        }, 100);
+        });
     }
 
     async function reportLoadout(raw) {
@@ -664,8 +768,16 @@
             pageDefenderName: getPageDefenderName()
         });
 
+        console.log("[Loadout Loader] PARSED LOADOUT", loadout);
+
         if (!attackerId || !defenderId || !loadout) {
-            log("Skipping report due to missing data", { attackerId, defenderId, attackerName, defenderName, loadout });
+            log("Skipping report due to missing data", {
+                attackerId,
+                defenderId,
+                attackerName,
+                defenderName,
+                loadout
+            });
             return;
         }
 
@@ -958,9 +1070,19 @@
             "white-space:nowrap"
         ].join(";");
 
-        btn.onclick = () => {
-            panel.style.display = panel.style.display === "none" ? "block" : "none";
+        let panelOpen = false;
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            panelOpen = !panelOpen;
+            panel.style.display = panelOpen ? "block" : "none";
         };
+
+        W.document.addEventListener("click", (e) => {
+            if (panelOpen && !host.contains(e.target)) {
+                panelOpen = false;
+                panel.style.display = "none";
+            }
+        });
 
         panel.querySelector("#loadout-quiet-chk").onchange = (e) => {
             setLocalStorage(CFG.store.quietToasts, e.target.checked ? "1" : "0");
@@ -1067,6 +1189,14 @@
 
     W.testBackendHistory = testBackendHistory;
 
+    function hasNativeDefenderLoadout(defenderItems) {
+        if (!defenderItems || typeof defenderItems !== "object") return false;
+        return Object.values(defenderItems).some(slot => {
+            const raw = slot?.item?.[0] || slot?.item || slot?.weapon || slot;
+            return !!extractItemId(raw);
+        });
+    }
+
     function processResponse(data) {
         if (!data || typeof data !== "object") return;
         if (!data.attackerUser && !data.DB?.attackerUser) return;
@@ -1076,6 +1206,7 @@
 
         const newDefenderId = extractUserId(db?.defenderUser);
         const oldDefenderId = extractUserId(STATE.attackData?.defenderUser);
+        const hadFightID = !!STATE.attackData?.fightID;
         const isFirstData = !STATE.attackData;
 
         if (newDefenderId && oldDefenderId && newDefenderId !== oldDefenderId) {
@@ -1083,6 +1214,10 @@
         }
 
         STATE.attackData = db;
+
+        if (!hadFightID && db.fightID) {
+            cleanupScriptOverlays();
+        }
 
         const extractedLoadout = extractLoadoutFromAttackData(db);
         const hasLoadout = !!extractedLoadout;
@@ -1098,7 +1233,7 @@
             hasLoadout
         });
 
-        if (hasLoadout && !STATE.uploaded) {
+        if (hasNativeDefenderLoadout(db?.defenderItems) && !STATE.uploaded) {
             STATE.uploaded = true;
             whenVisible(() => reportLoadout(db));
         } else if (isFirstData) {
@@ -1106,7 +1241,8 @@
         }
     }
 
-    if (typeof W.fetch === "function") {
+    if (typeof W.fetch === "function" && !W.__loadoutLoaderFetchPatched) {
+        W.__loadoutLoaderFetchPatched = true;
         const origFetch = W.fetch;
 
         W.fetch = async function (...args) {
@@ -1153,9 +1289,15 @@
         return true;
     }
 
-    if (!initPanel()) {
-        const waitForPanel = W.setInterval(() => {
-            if (initPanel()) W.clearInterval(waitForPanel);
-        }, 200);
+    const startPanelInit = () => {
+        if (!initPanel()) {
+            waitForElement("[class*='players___eKiHL'], [class*='labelsContainer']", () => initPanel());
+        }
+    };
+
+    if (W.document.readyState === "loading") {
+        W.document.addEventListener("DOMContentLoaded", startPanelInit, { once: true });
+    } else {
+        startPanelInit();
     }
 })();
