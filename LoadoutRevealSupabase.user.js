@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Loadout Loader
-// @namespace    loadout.loader
-// @version      3.3.0
-// @description  Captures Torn attack data and renders saved loadouts through backend API.
+// @name         Askelads Loadout Loader
+// @namespace    askelads.loadout.loader
+// @version      3.4.0
+// @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.3.0";
+    const SCRIPT_VERSION = "3.4.0";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -28,8 +28,7 @@
             apiKey: "loadout_loader_api_key",
             backendToken: "loadout_loader_backend_token",
             quietToasts: "loadout_loader_quiet_mode"
-        },
-        debug: true
+        }
     };
 
     const STATE = {
@@ -42,10 +41,6 @@
         authPromise: null,
         historyOpen: false
     };
-
-    function log(...args) {
-        if (CFG.debug) console.log("[Loadout Loader]", ...args);
-    }
 
     function getLocalStorage(key) {
         try { return localStorage.getItem(key); } catch { return null; }
@@ -159,18 +154,20 @@
 
         const el = W.document.createElement("div");
         el.style.cssText = [
-            "background:rgba(20,24,33,0.94)",
-            "color:#fff",
-            "border:1px solid rgba(255,255,255,0.12)",
-            "border-left:4px solid #ff6b6b",
+            "background:linear-gradient(180deg, rgba(24,20,17,0.98), rgba(14,12,10,0.98))",
+            "color:#f4e7c2",
+            "border:1px solid rgba(191,145,63,0.35)",
+            "border-left:4px solid #bf913f",
             "padding:10px 12px",
-            "border-radius:10px",
-            "font:13px/1.35 'Segoe UI',Tahoma,sans-serif",
-            "box-shadow:0 10px 26px rgba(0,0,0,0.35)"
+            "border-radius:12px",
+            "font:13px/1.4 'Segoe UI',Tahoma,sans-serif",
+            "box-shadow:0 12px 28px rgba(0,0,0,0.45)"
         ].join(";");
 
         el.innerHTML = `
-            <div style="font-weight:700;font-size:11px;color:#a0bcd8;margin-bottom:4px;">Loadout Loader</div>
+            <div style="font-weight:800;font-size:11px;color:#d7b46a;margin-bottom:4px;letter-spacing:.4px;text-transform:uppercase;">
+                Askelads Loadout
+            </div>
             <div>${escapeHtml(message)}</div>
         `;
 
@@ -200,8 +197,6 @@
             if (apiKey) headers["X-Torn-Api-Key"] = apiKey;
         }
 
-        log("API request", { method, url, body, auth });
-
         if (bridge?.callHandler) {
             const handler = method === "GET" ? "PDA_httpGet" : "PDA_httpPost";
             const call = method === "GET"
@@ -209,19 +204,12 @@
                 : bridge.callHandler(handler, url, headers, body ? JSON.stringify(body) : "");
 
             return call
-                .then(r => {
-                    const result = {
-                        ok: Number(r?.status || 0) >= 200 && Number(r?.status || 0) < 300,
-                        status: Number(r?.status || 0),
-                        data: parseJson(String(r?.responseText || ""))
-                    };
-                    log("API response (PDA)", result);
-                    return result;
-                })
-                .catch((err) => {
-                    log("API PDA request failed", err);
-                    return { ok: false, status: 0, data: null };
-                });
+                .then(r => ({
+                    ok: Number(r?.status || 0) >= 200 && Number(r?.status || 0) < 300,
+                    status: Number(r?.status || 0),
+                    data: parseJson(String(r?.responseText || ""))
+                }))
+                .catch(() => ({ ok: false, status: 0, data: null }));
         }
 
         if (typeof GM_xmlhttpRequest === "function") {
@@ -231,23 +219,13 @@
                     url,
                     headers,
                     ...(body ? { data: JSON.stringify(body) } : {}),
-                    onload: (r) => {
-                        const result = {
-                            ok: r.status >= 200 && r.status < 300,
-                            status: r.status,
-                            data: parseJson(r.responseText)
-                        };
-                        log("API response (GM)", result);
-                        resolve(result);
-                    },
-                    onerror: (err) => {
-                        log("API request error (GM)", err);
-                        resolve({ ok: false, status: 0, data: null });
-                    },
-                    ontimeout: () => {
-                        log("API request timeout (GM)");
-                        resolve({ ok: false, status: 0, data: null });
-                    }
+                    onload: (r) => resolve({
+                        ok: r.status >= 200 && r.status < 300,
+                        status: r.status,
+                        data: parseJson(r.responseText)
+                    }),
+                    onerror: () => resolve({ ok: false, status: 0, data: null }),
+                    ontimeout: () => resolve({ ok: false, status: 0, data: null })
                 });
             });
         }
@@ -463,7 +441,7 @@
 
         const factionText = STATE.userInfo?.faction_name ? ` (${STATE.userInfo.faction_name})` : "";
         statusEl.textContent = `Authorization: Allowed${factionText}`;
-        statusEl.style.color = "#7bcf9a";
+        statusEl.style.color = "#9fd09c";
     }
 
     function currentTargetId() {
@@ -611,7 +589,7 @@
         if (!weaponName) {
             weaponName = W.document.createElement("div");
             weaponName.className = "ll-weapon-name";
-            weaponName.style.cssText = "position:absolute;top:16px;left:9px;font-size:10px;color:#00a500;";
+            weaponName.style.cssText = "position:absolute;top:16px;left:9px;font-size:10px;color:#d7b46a;";
             wrapper.appendChild(weaponName);
         }
 
@@ -759,25 +737,7 @@
         const defenderName = extractUserName(raw?.defenderUser) || getPageDefenderName();
         const loadout = extractLoadoutFromAttackData(raw);
 
-        console.log("[Loadout Loader] NAME DEBUG", {
-            rawAttackerUser: raw?.attackerUser,
-            rawDefenderUser: raw?.defenderUser,
-            extractedAttackerName: extractUserName(raw?.attackerUser),
-            extractedDefenderName: extractUserName(raw?.defenderUser),
-            pageAttackerName: getPageAttackerName(),
-            pageDefenderName: getPageDefenderName()
-        });
-
-        console.log("[Loadout Loader] PARSED LOADOUT", loadout);
-
         if (!attackerId || !defenderId || !loadout) {
-            log("Skipping report due to missing data", {
-                attackerId,
-                defenderId,
-                attackerName,
-                defenderName,
-                loadout
-            });
             return;
         }
 
@@ -789,18 +749,15 @@
             loadout
         };
 
-        console.log("[Loadout Loader] REPORT PAYLOAD", payload);
-
         const res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
-        log("Report response", res);
 
         if (res.ok && res.data?.ok) {
-            toastInfo("Defender loadout saved");
+            toastInfo("Loadout saved to the war chest.");
         } else if (res.status === 401) {
             resetAuthorizationState();
-            toast("Backend session expired. Please save your API key again.", 6000);
+            toast("Backend session expired. Save your API key again.");
         } else {
-            toast(res.data?.error || "Failed to save defender loadout");
+            toast(res.data?.error || "Failed to save defender loadout.");
         }
     }
 
@@ -826,6 +783,27 @@
         STATE.historyOpen = false;
     }
 
+    function askeladsButtonStyle(kind = "gold") {
+        const styles = {
+            gold: "padding:7px 10px;border:1px solid rgba(191,145,63,0.35);border-radius:10px;background:linear-gradient(180deg,#4f3a17,#2d2010);color:#f4e7c2;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);",
+            green: "padding:7px 10px;border:1px solid rgba(91,135,84,0.35);border-radius:10px;background:linear-gradient(180deg,#294126,#182718);color:#d9f0d4;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);",
+            red: "padding:7px 10px;border:1px solid rgba(140,54,54,0.35);border-radius:10px;background:linear-gradient(180deg,#4a1f1f,#291212);color:#ffd6d6;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);",
+            steel: "padding:7px 10px;border:1px solid rgba(130,130,130,0.22);border-radius:10px;background:linear-gradient(180deg,#2a2d31,#181a1d);color:#e7e7e7;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.04);",
+            bright: "padding:7px 10px;border:1px solid rgba(191,145,63,0.42);border-radius:10px;background:linear-gradient(180deg,#7b5a24,#4f3815);color:#fff3d4;cursor:pointer;font-weight:800;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08);"
+        };
+        return styles[kind] || styles.gold;
+    }
+
+    function getApiKeyHelpHtml() {
+        return `
+            <div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(191,145,63,0.15);color:#d7cfbf;font-size:11px;line-height:1.45;">
+                This tool uses your <b style="color:#f4e7c2;">Torn Public API key</b> only to identify your player and faction and authenticate with the Askelads backend.
+                It does <b>not</b> require full-access account data.
+                You can create or revoke a public key any time in Torn settings.
+            </div>
+        `;
+    }
+
     async function showHistoryModal() {
         if (STATE.historyOpen) {
             closeHistoryModal();
@@ -847,7 +825,7 @@
         overlay.style.cssText = [
             "position:fixed",
             "inset:0",
-            "background:rgba(0,0,0,0.55)",
+            "background:rgba(0,0,0,0.62)",
             "z-index:2147483647",
             "display:flex",
             "align-items:center",
@@ -857,36 +835,36 @@
 
         const card = W.document.createElement("div");
         card.style.cssText = [
-            "width:min(520px, 96vw)",
+            "width:min(560px, 96vw)",
             "max-height:80vh",
             "overflow:hidden",
             "display:flex",
             "flex-direction:column",
-            "background:rgba(12,18,28,0.98)",
-            "border:1px solid rgba(255,255,255,0.12)",
+            "background:linear-gradient(180deg, rgba(23,19,16,0.985), rgba(12,10,8,0.985))",
+            "border:1px solid rgba(191,145,63,0.22)",
             "border-radius:14px",
-            "box-shadow:0 16px 40px rgba(0,0,0,0.42)",
-            "color:#eaf4ff"
+            "box-shadow:0 18px 38px rgba(0,0,0,0.5)",
+            "color:#f1e6c9"
         ].join(";");
 
         const header = W.document.createElement("div");
-        header.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:14px 14px 10px 14px;border-bottom:1px solid rgba(255,255,255,0.08);";
+        header.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:14px 14px 10px 14px;border-bottom:1px solid rgba(191,145,63,0.12);";
         header.innerHTML = `
             <div>
-                <div style="font-weight:700;font-size:15px;">Loadout History</div>
-                <div style="font-size:12px;color:#9eb4c9;">${escapeHtml(targetName)} [${escapeHtml(targetId)}]</div>
+                <div style="font-weight:800;font-size:15px;color:#f4e7c2;letter-spacing:.3px;">War Chest History</div>
+                <div style="font-size:12px;color:#c9b892;">${escapeHtml(targetName)} [${escapeHtml(targetId)}]</div>
             </div>
         `;
 
         const closeBtn = W.document.createElement("button");
         closeBtn.textContent = "Close";
-        closeBtn.style.cssText = "padding:7px 10px;border:none;border-radius:8px;background:#6c3f7e;color:#fff;cursor:pointer;";
+        closeBtn.style.cssText = askeladsButtonStyle("red");
         closeBtn.onclick = closeHistoryModal;
         header.appendChild(closeBtn);
 
         const body = W.document.createElement("div");
         body.style.cssText = "padding:12px;overflow:auto;display:flex;flex-direction:column;gap:8px;";
-        body.innerHTML = `<div style="color:#9eb4c9;font-size:12px;">Loading history...</div>`;
+        body.innerHTML = `<div style="color:#c9b892;font-size:12px;">Loading history...</div>`;
 
         card.appendChild(header);
         card.appendChild(body);
@@ -904,14 +882,14 @@
         body.innerHTML = "";
 
         if (!rows.length) {
-            body.innerHTML = `<div style="color:#9eb4c9;font-size:12px;">No history found for this defender yet.</div>`;
+            body.innerHTML = `<div style="color:#c9b892;font-size:12px;">No history found for this defender yet.</div>`;
             return;
         }
 
         rows.forEach((row, index) => {
             const item = W.document.createElement("div");
             item.style.cssText = [
-                "border:1px solid rgba(255,255,255,0.10)",
+                "border:1px solid rgba(191,145,63,0.12)",
                 "background:rgba(255,255,255,0.03)",
                 "border-radius:10px",
                 "padding:10px",
@@ -927,9 +905,9 @@
 
             const meta = W.document.createElement("div");
             meta.innerHTML = `
-                <div style="font-weight:700;font-size:12px;">Snapshot #${index + 1}</div>
-                <div style="font-size:11px;color:#a8bfd6;">${escapeHtml(timeText)}</div>
-                <div style="font-size:11px;color:#7f97af;">Observed at: ${escapeHtml(observedAt)}</div>
+                <div style="font-weight:700;font-size:12px;color:#f4e7c2;">Snapshot #${index + 1}</div>
+                <div style="font-size:11px;color:#c9b892;">${escapeHtml(timeText)}</div>
+                <div style="font-size:11px;color:#a99a82;">Observed at: ${escapeHtml(observedAt)}</div>
             `;
 
             const actions = W.document.createElement("div");
@@ -937,7 +915,7 @@
 
             const renderBtn = W.document.createElement("button");
             renderBtn.textContent = "Render";
-            renderBtn.style.cssText = "padding:6px 9px;border:none;border-radius:8px;background:#2f5da9;color:#fff;cursor:pointer;";
+            renderBtn.style.cssText = askeladsButtonStyle("gold");
             renderBtn.onclick = () => {
                 STATE.loadoutRendered = false;
                 renderLoadout(row.loadout, row.observed_at, true);
@@ -946,7 +924,7 @@
 
             const jsonBtn = W.document.createElement("button");
             jsonBtn.textContent = "JSON";
-            jsonBtn.style.cssText = "padding:6px 9px;border:none;border-radius:8px;background:#4d5d6b;color:#fff;cursor:pointer;";
+            jsonBtn.style.cssText = askeladsButtonStyle("steel");
             jsonBtn.onclick = () => {
                 W.prompt("Loadout JSON", JSON.stringify(row.loadout, null, 2));
             };
@@ -964,17 +942,6 @@
         W.open("https://www.torn.com/preferences.php#tab=api", "_blank", "noopener,noreferrer");
     }
 
-    function getApiKeyHelpHtml() {
-        return `
-            <div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:#b9cfe5;font-size:11px;line-height:1.4;">
-                This script uses your <b>Torn Public API key</b> only to identify your player and faction and authenticate with the Loadout backend.
-                It does <b>not</b> require full-access account data.
-                The backend may also use the same key to resolve missing defender names for saved loadout records.
-                You can create or revoke a public key at any time in Torn settings.
-            </div>
-        `;
-    }
-
     function createPanel() {
         const host = W.document.createElement("div");
         host.id = "loadout-panel";
@@ -988,18 +955,20 @@
         ].join(";");
 
         const btn = W.document.createElement("button");
-        btn.textContent = "Loader Settings";
+        btn.textContent = "⚔ Askelads";
         btn.style.cssText = [
-            "border:1px solid rgba(255,255,255,0.16)",
-            "background:rgba(15,23,34,0.96)",
-            "color:#dfefff",
-            "padding:0 10px",
-            "border-radius:8px",
+            "border:1px solid rgba(191,145,63,0.35)",
+            "background:linear-gradient(180deg,#3f2d14,#24190d)",
+            "color:#f4e7c2",
+            "padding:0 12px",
+            "border-radius:10px",
             "cursor:pointer",
             "font:11px/1.2 'Segoe UI',Tahoma,sans-serif",
-            "font-weight:700",
-            "height:30px",
-            "box-sizing:border-box"
+            "font-weight:800",
+            "height:32px",
+            "box-sizing:border-box",
+            "letter-spacing:.3px",
+            "box-shadow:0 6px 14px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.05)"
         ].join(";");
 
         const panel = W.document.createElement("div");
@@ -1007,32 +976,32 @@
         panel.style.cssText = [
             "display:none",
             "position:absolute",
-            "top:calc(100% + 4px)",
+            "top:calc(100% + 6px)",
             "left:100%",
             "transform:translateX(-100%)",
-            "width:380px",
+            "width:390px",
             "z-index:2147483647",
-            "border:1px solid rgba(255,255,255,0.16)",
-            "background:rgba(10,16,24,0.97)",
-            "color:#dfefff",
-            "padding:10px",
-            "border-radius:10px",
-            "box-shadow:0 10px 26px rgba(0,0,0,0.35)"
+            "border:1px solid rgba(191,145,63,0.22)",
+            "background:linear-gradient(180deg, rgba(23,19,16,0.985), rgba(12,10,8,0.985))",
+            "color:#f1e6c9",
+            "padding:12px",
+            "border-radius:14px",
+            "box-shadow:0 18px 38px rgba(0,0,0,0.5)"
         ].join(";");
 
         const savedKey = getAPIKey();
 
         const pdaKeyControls = IS_PDA
-            ? `<div style="margin-bottom:6px;color:#7bcf9a;font-size:11px;">Torn-PDA detected. API key is loaded automatically.</div>
+            ? `<div style="margin-bottom:8px;color:#9fd09c;font-size:11px;">Torn-PDA detected. API key is loaded automatically.</div>
                ${getApiKeyHelpHtml()}`
-            : `<div style="margin-bottom:4px;color:#b9cfe5;">Torn API Key (Public)</div>
+            : `<div style="margin-bottom:5px;color:#d7b46a;font-size:11px;font-weight:700;letter-spacing:.25px;text-transform:uppercase;">Torn Public API Key</div>
                <input id="loadout-key-input" type="password" placeholder="Enter your Torn public API key" value="${escapeHtml(savedKey)}"
-                 style="width:100%;padding:7px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(2,8,14,0.94);color:#eaf4ff;margin-bottom:8px;box-sizing:border-box;">
+                 style="width:100%;padding:8px 10px;border-radius:10px;border:1px solid rgba(191,145,63,0.18);background:rgba(7,7,7,0.45);color:#f4e7c2;margin-bottom:9px;box-sizing:border-box;outline:none;">
 
                <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                 <button id="loadout-save-btn" style="padding:6px 9px;border:none;border-radius:8px;background:#1e7cdd;color:#fff;cursor:pointer;">Save Key</button>
-                 <button id="loadout-clear-btn" style="padding:6px 9px;border:none;border-radius:8px;background:#6c3f7e;color:#fff;cursor:pointer;">Clear Key</button>
-                 <button id="loadout-create-public-key-btn" style="padding:6px 9px;border:none;border-radius:8px;background:${savedKey ? "#2f5da9" : "#1f8f55"};color:#fff;cursor:pointer;font-weight:${savedKey ? "400" : "700"};">
+                 <button id="loadout-save-btn" style="${askeladsButtonStyle("bright")}">Save Key</button>
+                 <button id="loadout-clear-btn" style="${askeladsButtonStyle("red")}">Clear Key</button>
+                 <button id="loadout-create-public-key-btn" style="${askeladsButtonStyle(savedKey ? "steel" : "green")}">
                    ${savedKey ? "Open API Settings" : "Create Public Key"}
                  </button>
                </div>
@@ -1041,18 +1010,33 @@
         ;
 
         panel.innerHTML = `
-            <div style="font-weight:700;margin-bottom:8px;">Loadout Loader - Settings</div>
-            ${pdaKeyControls}
-            <label style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer;color:#b9cfe5;font-size:12px;">
-                <input id="loadout-quiet-chk" type="checkbox" ${getLocalStorage(CFG.store.quietToasts) === "1" ? "checked" : ""}>
-                Quiet mode (hide routine alerts)
-            </label>
-            <div id="loadout-auth-status" style="margin-top:10px;color:#b9cfe5;font-size:11px;">Authorization: Not checked</div>
-            <div style="display:flex;gap:6px;margin-top:10px;">
-                <button id="loadout-show-history-btn" style="flex:1;padding:7px 9px;border:none;border-radius:8px;background:#2f5da9;color:#fff;cursor:pointer;">History</button>
-                <button id="loadout-show-latest-btn" style="flex:1;padding:7px 9px;border:none;border-radius:8px;background:#3f7e5f;color:#fff;cursor:pointer;">Show Latest</button>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+                <div>
+                    <div style="font-weight:800;font-size:16px;color:#f4e7c2;letter-spacing:.35px;">Askelads Loadout</div>
+                    <div style="font-size:11px;color:#b8a786;">War-room viewer and recorder</div>
+                </div>
+                <div style="font-size:11px;color:#8f836f;">v${SCRIPT_VERSION}</div>
             </div>
-            <div style="margin-top:10px;color:#6a8aaa;font-size:10px;">Backend: API</div>
+
+            ${pdaKeyControls}
+
+            <label style="display:flex;align-items:center;gap:7px;margin-top:10px;cursor:pointer;color:#d8ceb9;font-size:12px;">
+                <input id="loadout-quiet-chk" type="checkbox" ${getLocalStorage(CFG.store.quietToasts) === "1" ? "checked" : ""}>
+                Quiet mode
+            </label>
+
+            <div id="loadout-auth-status" style="margin-top:10px;padding:8px 10px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(191,145,63,0.12);color:#c9b892;font-size:11px;">
+                Authorization: Not checked
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;">
+                <button id="loadout-show-history-btn" style="${askeladsButtonStyle("gold")}">History</button>
+                <button id="loadout-show-latest-btn" style="${askeladsButtonStyle("green")}">Show Latest</button>
+            </div>
+
+            <div style="margin-top:10px;color:#877964;font-size:10px;">
+                Askelads backend active
+            </div>
         `;
 
         const stamp = W.document.createElement("span");
@@ -1060,12 +1044,12 @@
         stamp.style.cssText = [
             "display:none",
             "align-items:center",
-            "height:30px",
+            "height:32px",
             "padding:0 10px",
-            "border-radius:6px",
-            "border:1px solid rgba(255,255,255,0.12)",
-            "background:rgba(0,0,0,0.22)",
-            "color:#d7d7d7",
+            "border-radius:8px",
+            "border:1px solid rgba(191,145,63,0.18)",
+            "background:rgba(16,13,10,0.72)",
+            "color:#d7c093",
             "font-size:11px",
             "white-space:nowrap"
         ].join(";");
@@ -1102,7 +1086,7 @@
             panel.querySelector("#loadout-save-btn").onclick = async () => {
                 const key = input.value.trim();
                 if (!key) {
-                    toast("Please enter a key.", 5000);
+                    toast("Please enter a key.");
                     return;
                 }
 
@@ -1113,7 +1097,7 @@
                 updateAuthStatus();
 
                 if (ok) {
-                    toastInfo("API key saved and authorized.");
+                    toastInfo("Key saved. Welcome back to the war room.");
                     fetchAndRenderLoadout(true);
                 }
             };
@@ -1128,7 +1112,7 @@
 
             panel.querySelector("#loadout-create-public-key-btn").onclick = () => {
                 openTornPublicApiKeyPage();
-                toastInfo("Opened Torn API settings in a new tab.");
+                toastInfo("Opened Torn API settings.");
             };
         }
 
@@ -1156,8 +1140,7 @@
         resetAuthorizationState();
         const ok = await ensureAuthorized();
         updateAuthStatus();
-        console.log("[Loadout Loader Test] Backend auth:", { ok, userInfo: STATE.userInfo, token: getBackendToken() });
-        toast(ok ? "Backend auth successful" : "Backend auth failed", 5000);
+        toast(ok ? "Backend auth successful." : "Backend auth failed.");
         return ok;
     }
 
@@ -1166,12 +1149,10 @@
     async function testBackendLatest() {
         const targetId = currentTargetId();
         if (!targetId) {
-            toast("No defender detected", 4000);
+            toast("No defender detected.");
             return null;
         }
-        const res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
-        console.log("[Loadout Loader Test] Latest:", res);
-        return res;
+        return apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
     }
 
     W.testBackendLatest = testBackendLatest;
@@ -1179,12 +1160,10 @@
     async function testBackendHistory() {
         const targetId = currentTargetId();
         if (!targetId) {
-            toast("No defender detected", 4000);
+            toast("No defender detected.");
             return null;
         }
-        const res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=5`, null, { auth: true });
-        console.log("[Loadout Loader Test] History:", res);
-        return res;
+        return apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=5`, null, { auth: true });
     }
 
     W.testBackendHistory = testBackendHistory;
@@ -1202,8 +1181,6 @@
         if (!data.attackerUser && !data.DB?.attackerUser) return;
 
         const db = data.DB || data;
-        W.attackDataDebug = db;
-
         const newDefenderId = extractUserId(db?.defenderUser);
         const oldDefenderId = extractUserId(STATE.attackData?.defenderUser);
         const hadFightID = !!STATE.attackData?.fightID;
@@ -1219,20 +1196,6 @@
             cleanupScriptOverlays();
         }
 
-        const extractedLoadout = extractLoadoutFromAttackData(db);
-        const hasLoadout = !!extractedLoadout;
-
-        log("attackData received", {
-            attackerUser: db?.attackerUser,
-            defenderUser: db?.defenderUser,
-            defenderNames: {
-                attacker: extractUserName(db?.attackerUser) || getPageAttackerName(),
-                defender: extractUserName(db?.defenderUser) || getPageDefenderName()
-            },
-            defenderItems: db?.defenderItems,
-            hasLoadout
-        });
-
         if (hasNativeDefenderLoadout(db?.defenderItems) && !STATE.uploaded) {
             STATE.uploaded = true;
             whenVisible(() => reportLoadout(db));
@@ -1241,8 +1204,8 @@
         }
     }
 
-    if (typeof W.fetch === "function" && !W.__loadoutLoaderFetchPatched) {
-        W.__loadoutLoaderFetchPatched = true;
+    if (typeof W.fetch === "function" && !W.__askeladsLoadoutFetchPatched) {
+        W.__askeladsLoadoutFetchPatched = true;
         const origFetch = W.fetch;
 
         W.fetch = async function (...args) {
@@ -1255,12 +1218,9 @@
             try {
                 response.clone().text().then(text => {
                     const parsed = parseJson(text);
-                    log("Intercepted attackData fetch", { url, parsed });
                     processResponse(parsed);
                 });
-            } catch (err) {
-                log("Failed processing intercepted attackData", err);
-            }
+            } catch {}
             return response;
         };
     }
@@ -1271,8 +1231,6 @@
         const labelsContainer = W.document.querySelector("[class*='labelsContainer']");
         if (!labelsContainer) return false;
 
-        log(`Script loaded v${SCRIPT_VERSION}`);
-
         const { host, panel, toastHost } = createPanel();
         labelsContainer.insertBefore(host, labelsContainer.firstChild);
         W.document.body.appendChild(toastHost);
@@ -1280,7 +1238,7 @@
         const apiKey = getAPIKey();
         if (!apiKey) {
             panel.style.display = "block";
-            toast("Please enter your API Key (Public Only) to authenticate!");
+            toast("Enter your Public API key to join the war room.");
         } else {
             ensureAuthorized().then(updateAuthStatus);
         }
