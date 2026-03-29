@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.5.1
+// @version      3.5.2
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -475,20 +475,26 @@ async function fetchAndRenderLoadout(force = false) {
     const targetId = currentTargetId();
     if (!targetId) return;
 
-    let res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
+    let row = await getLatestLoadout(targetId);
 
-    if (res.status === 401) {
-        resetAuthorizationState();
-        authorized = await ensureAuthorized();
-        updateAuthStatus();
-        if (!authorized) return;
+    if (!row) {
+        const directRes = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
 
-        res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
+        if (directRes.status === 401) {
+            resetAuthorizationState();
+            authorized = await ensureAuthorized();
+            updateAuthStatus();
+            if (!authorized) return;
+
+            row = await getLatestLoadout(targetId);
+        } else if (directRes.ok && directRes.data?.ok && directRes.data?.loadout) {
+            row = directRes.data.loadout;
+        }
     }
 
-    if (!res.ok || !res.data?.ok || !res.data?.loadout) return;
-
-    renderLoadout(res.data.loadout.loadout, res.data.loadout.inserted_at, force);
+    if (row?.loadout) {
+        renderLoadout(row.loadout, row.inserted_at, force);
+    }
 }
 
     function queryFirst(root, selectors) {
