@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.5.2
+// @version      3.5.3
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -531,10 +531,18 @@ async function fetchAndRenderLoadout(force = false) {
     }
 
     function buildSlotIcons(arr, key, name, desc) {
-        return [0, 1].map(i => arr?.[i]
-            ? buildIconHtml(arr[i][key], arr[i][name], arr[i][desc])
-            : buildIconHtml(null, "", "")
-        ).join("");
+        return [0, 1].map(i => {
+            if (!arr?.[i]) {
+                return buildIconHtml(null, "", "");
+            }
+    
+            const item = arr[i];
+            const iconValue = key === "bonus_key"
+                ? normalizeBonusIconKey(item)
+                : item[key];
+    
+            return buildIconHtml(iconValue, item[name], item[desc]);
+        }).join("");
     }
 
     const INFINITY_SVG = `<span class="eternity___QmjtV"><svg xmlns="http://www.w3.org/2000/svg" width="17" height="10" viewBox="0 0 17 10"><g><path d="M 12.3399 1.5 C 10.6799 1.5 9.64995 2.76 8.50995 3.95 C 7.35995 2.76 6.33995 1.5 4.66995 1.5 C 2.89995 1.51 1.47995 2.95 1.48995 4.72 C 1.48995 4.81 1.48995 4.91 1.49995 5 C 1.32995 6.76 2.62995 8.32 4.38995 8.49 C 4.47995 8.49 4.57995 8.5 4.66995 8.5 C 6.32995 8.5 7.35995 7.24 8.49995 6.05 C 9.64995 7.24 10.67 8.5 12.33 8.5 C 14.0999 8.49 15.5199 7.05 15.5099 5.28 C 15.5099 5.19 15.5099 5.09 15.4999 5 C 15.6699 3.24 14.3799 1.68 12.6199 1.51 C 12.5299 1.51 12.4299 1.5 12.3399 1.5 Z M 4.66995 7.33 C 3.52995 7.33 2.61995 6.4 2.61995 5.26 C 2.61995 5.17 2.61995 5.09 2.63995 5 C 2.48995 3.87 3.27995 2.84 4.40995 2.69 C 4.49995 2.68 4.57995 2.67 4.66995 2.67 C 6.01995 2.67 6.83995 3.87 7.79995 5 C 6.83995 6.14 6.01995 7.33 4.66995 7.33 Z M 12.3399 7.33 C 10.99 7.33 10.17 6.13 9.20995 5 C 10.17 3.86 10.99 2.67 12.3399 2.67 C 13.48 2.67 14.3899 3.61 14.3899 4.74 C 14.3899 4.83 14.3899 4.91 14.3699 5 C 14.5199 6.13 13.7299 7.16 12.5999 7.31 C 12.5099 7.32 12.4299 7.33 12.3399 7.33 Z" stroke-width="0"></path></g></svg></span>`;
@@ -586,6 +594,40 @@ async function fetchAndRenderLoadout(force = false) {
                 : `<div class="props___oL_Cw">${modIcons}</div>
                    <div class="props___oL_Cw">${bonusIcons}</div>`;
         }
+
+        function normalizeBonusIconKey(bonus) {
+    const rawKey = String(bonus?.bonus_key || "").trim();
+    if (rawKey && isNaN(Number(rawKey))) return rawKey;
+
+    const name = String(bonus?.name || "").trim().toLowerCase();
+
+    const byName = {
+        "specialist": "specialist",
+        "warlord": "warlord",
+        "bleed": "bleed",
+        "impenetrable": "impenetrable",
+        "quicken": "quicken",
+        "puncture": "puncture",
+        "deadeye": "deadeye",
+        "freeze": "freeze",
+        "burn": "burn",
+        "empower": "empower",
+        "execute": "execute",
+        "focus": "focus",
+        "rage": "rage",
+        "slow": "slow",
+        "smurf": "smurf",
+        "suppress": "suppress",
+        "motivation": "motivation",
+        "storage": "storage",
+        "home": "home",
+        "vanguard": "vanguard",
+        "irresistible": "irresistible",
+        "irrepressible": "vanguard"
+    };
+
+    return byName[name] || "blank-bonus-25";
+}
 
         const bottom = queryFirst(wrapper, ["[class*='bottom___']"]);
         if (bottom) {
