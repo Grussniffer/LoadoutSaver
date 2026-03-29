@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.5.1
+// @version      3.5.2
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -475,15 +475,19 @@ async function fetchAndRenderLoadout(force = false) {
     const targetId = currentTargetId();
     if (!targetId) return;
 
-    let res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
-
+    let res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
+    
     if (res.status === 401) {
         resetAuthorizationState();
-        authorized = await ensureAuthorized();
+        const reauthed = await ensureAuthorized();
         updateAuthStatus();
-        if (!authorized) return;
-
-        res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
+    
+        if (!reauthed) {
+            toast("Backend session expired. Save your API key again.");
+            return;
+        }
+    
+        res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
     }
 
     if (!res.ok || !res.data?.ok || !res.data?.loadout) return;
