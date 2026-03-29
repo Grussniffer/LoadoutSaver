@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.5.3
+// @version      3.6.0
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.5.0";
+    const SCRIPT_VERSION = "3.5.1";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -297,6 +297,40 @@
         return raw?.ID ?? raw?.id ?? raw?.item_id ?? raw?.itemID ?? null;
     }
 
+    function normalizeBonusIconKey(bonus) {
+        const rawKey = String(bonus?.bonus_key || "").trim();
+        if (rawKey && isNaN(Number(rawKey))) return rawKey;
+
+        const name = String(bonus?.name || "").trim().toLowerCase();
+
+        const byName = {
+            "specialist": "specialist",
+            "warlord": "warlord",
+            "bleed": "bleed",
+            "impenetrable": "impenetrable",
+            "quicken": "quicken",
+            "puncture": "puncture",
+            "deadeye": "deadeye",
+            "freeze": "freeze",
+            "burn": "burn",
+            "empower": "empower",
+            "execute": "execute",
+            "focus": "focus",
+            "rage": "rage",
+            "slow": "slow",
+            "smurf": "smurf",
+            "suppress": "suppress",
+            "motivation": "motivation",
+            "storage": "storage",
+            "home": "home",
+            "vanguard": "vanguard",
+            "irresistible": "irresistible",
+            "irrepressible": "vanguard"
+        };
+
+        return byName[name] || "blank-bonus-25";
+    }
+
     function normalizeMods(mods) {
         if (!mods) return [];
         const arr = Array.isArray(mods) ? mods : Object.values(mods);
@@ -318,7 +352,10 @@
             }));
 
         return arr.map(b => ({
-            bonus_key: b?.bonus_key || b?.key || b?.icon || b?.type || b?.title || null,
+            bonus_key: b?.icon || normalizeBonusIconKey({
+                bonus_key: b?.bonus_key || b?.key,
+                name: b?.title || b?.name || b?.label || ""
+            }),
             name: b?.title || b?.name || b?.label || "",
             description: b?.desc || b?.description || b?.text || b?.hoverover || ""
         }));
@@ -406,24 +443,24 @@
         return true;
     }
 
-async function ensureAuthorized() {
-    if (STATE.authChecked) return STATE.isAuthorized;
+    async function ensureAuthorized() {
+        if (STATE.authChecked) return STATE.isAuthorized;
 
-    const existingToken = getBackendToken();
-    if (existingToken) {
-        STATE.authChecked = true;
-        STATE.isAuthorized = true;
-        return true;
+        const existingToken = getBackendToken();
+        if (existingToken) {
+            STATE.authChecked = true;
+            STATE.isAuthorized = true;
+            return true;
+        }
+
+        if (!STATE.authPromise) {
+            STATE.authPromise = validateUserAccess().finally(() => {
+                STATE.authPromise = null;
+            });
+        }
+
+        return STATE.authPromise;
     }
-
-    if (!STATE.authPromise) {
-        STATE.authPromise = validateUserAccess().finally(() => {
-            STATE.authPromise = null;
-        });
-    }
-
-    return STATE.authPromise;
-}
 
     function updateAuthStatus() {
         const statusEl = W.document.getElementById("loadout-auth-status");
@@ -432,6 +469,12 @@ async function ensureAuthorized() {
         if (!getAPIKey()) {
             statusEl.textContent = "Authorization: API key required";
             statusEl.style.color = "#ffb3b3";
+            return;
+        }
+
+        if (!STATE.authChecked && getBackendToken()) {
+            statusEl.textContent = "Authorization: Session active";
+            statusEl.style.color = "#9fd09c";
             return;
         }
 
@@ -467,35 +510,35 @@ async function ensureAuthorized() {
         return res.data.loadout;
     }
 
-async function fetchAndRenderLoadout(force = false) {
-    let authorized = await ensureAuthorized();
-    updateAuthStatus();
-    if (!authorized) return;
+    async function fetchAndRenderLoadout(force = false) {
+        let authorized = await ensureAuthorized();
+        updateAuthStatus();
+        if (!authorized) return;
 
-    const targetId = currentTargetId();
-    if (!targetId) return;
+        const targetId = currentTargetId();
+        if (!targetId) return;
 
-    let row = await getLatestLoadout(targetId);
+        let row = await getLatestLoadout(targetId);
 
-    if (!row) {
-        const directRes = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
+        if (!row) {
+            const directRes = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
 
-        if (directRes.status === 401) {
-            resetAuthorizationState();
-            authorized = await ensureAuthorized();
-            updateAuthStatus();
-            if (!authorized) return;
+            if (directRes.status === 401) {
+                resetAuthorizationState();
+                authorized = await ensureAuthorized();
+                updateAuthStatus();
+                if (!authorized) return;
 
-            row = await getLatestLoadout(targetId);
-        } else if (directRes.ok && directRes.data?.ok && directRes.data?.loadout) {
-            row = directRes.data.loadout;
+                row = await getLatestLoadout(targetId);
+            } else if (directRes.ok && directRes.data?.ok && directRes.data?.loadout) {
+                row = directRes.data.loadout;
+            }
+        }
+
+        if (row?.loadout) {
+            renderLoadout(row.loadout, row.inserted_at, force);
         }
     }
-
-    if (row?.loadout) {
-        renderLoadout(row.loadout, row.inserted_at, force);
-    }
-}
 
     function queryFirst(root, selectors) {
         for (const s of selectors) {
@@ -535,12 +578,12 @@ async function fetchAndRenderLoadout(force = false) {
             if (!arr?.[i]) {
                 return buildIconHtml(null, "", "");
             }
-    
+
             const item = arr[i];
             const iconValue = key === "bonus_key"
                 ? normalizeBonusIconKey(item)
                 : item[key];
-    
+
             return buildIconHtml(iconValue, item[name], item[desc]);
         }).join("");
     }
@@ -594,40 +637,6 @@ async function fetchAndRenderLoadout(force = false) {
                 : `<div class="props___oL_Cw">${modIcons}</div>
                    <div class="props___oL_Cw">${bonusIcons}</div>`;
         }
-
-        function normalizeBonusIconKey(bonus) {
-    const rawKey = String(bonus?.bonus_key || "").trim();
-    if (rawKey && isNaN(Number(rawKey))) return rawKey;
-
-    const name = String(bonus?.name || "").trim().toLowerCase();
-
-    const byName = {
-        "specialist": "specialist",
-        "warlord": "warlord",
-        "bleed": "bleed",
-        "impenetrable": "impenetrable",
-        "quicken": "quicken",
-        "puncture": "puncture",
-        "deadeye": "deadeye",
-        "freeze": "freeze",
-        "burn": "burn",
-        "empower": "empower",
-        "execute": "execute",
-        "focus": "focus",
-        "rage": "rage",
-        "slow": "slow",
-        "smurf": "smurf",
-        "suppress": "suppress",
-        "motivation": "motivation",
-        "storage": "storage",
-        "home": "home",
-        "vanguard": "vanguard",
-        "irresistible": "irresistible",
-        "irrepressible": "vanguard"
-    };
-
-    return byName[name] || "blank-bonus-25";
-}
 
         const bottom = queryFirst(wrapper, ["[class*='bottom___']"]);
         if (bottom) {
@@ -818,20 +827,30 @@ async function fetchAndRenderLoadout(force = false) {
             loadout
         };
 
-        const res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
+        let res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
+
+        if (res.status === 401) {
+            resetAuthorizationState();
+            const reauthed = await ensureAuthorized();
+            updateAuthStatus();
+
+            if (!reauthed) {
+                toast("Backend session expired. Save your API key again.");
+                return;
+            }
+
+            res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
+        }
 
         if (res.ok && res.data?.ok) {
             toastInfo("Loadout saved to the war chest.");
-        } else if (res.status === 401) {
-            resetAuthorizationState();
-            toast("Backend session expired. Save your API key again.");
         } else {
             toast(res.data?.error || "Failed to save defender loadout.");
         }
     }
 
     async function fetchHistoryForCurrentTarget() {
-        const authorized = await ensureAuthorized();
+        let authorized = await ensureAuthorized();
         updateAuthStatus();
         if (!authorized) return [];
 
@@ -841,7 +860,17 @@ async function fetchAndRenderLoadout(force = false) {
             return [];
         }
 
-        const res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null, { auth: true });
+        let res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null, { auth: true });
+
+        if (res.status === 401) {
+            resetAuthorizationState();
+            authorized = await ensureAuthorized();
+            updateAuthStatus();
+            if (!authorized) return [];
+
+            res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null, { auth: true });
+        }
+
         if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
         return res.data.history;
     }
@@ -1049,7 +1078,10 @@ async function fetchAndRenderLoadout(force = false) {
             "top:calc(100% + 6px)",
             "left:100%",
             "transform:translateX(-100%)",
-            "width:390px",
+            `width:${IS_PDA ? "min(320px, 92vw)" : "390px"}`,
+            "max-width:92vw",
+            `max-height:${IS_PDA ? "70vh" : "80vh"}`,
+            "overflow:auto",
             "z-index:2147483647",
             "border:1px solid rgba(191,145,63,0.22)",
             "background:linear-gradient(180deg, rgba(23,19,16,0.985), rgba(12,10,8,0.985))",
@@ -1058,6 +1090,12 @@ async function fetchAndRenderLoadout(force = false) {
             "border-radius:14px",
             "box-shadow:0 18px 38px rgba(0,0,0,0.5)"
         ].join(";");
+
+        if (IS_PDA) {
+            panel.style.left = "0";
+            panel.style.transform = "none";
+            panel.style.padding = "10px";
+        }
 
         const savedKey = getAPIKey();
 
