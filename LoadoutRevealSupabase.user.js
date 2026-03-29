@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.5.0
+// @version      3.5.1
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
@@ -406,15 +406,24 @@
         return true;
     }
 
-    async function ensureAuthorized() {
-        if (STATE.authChecked) return STATE.isAuthorized;
-        if (!STATE.authPromise) {
-            STATE.authPromise = validateUserAccess().finally(() => {
-                STATE.authPromise = null;
-            });
-        }
-        return STATE.authPromise;
+async function ensureAuthorized() {
+    if (STATE.authChecked) return STATE.isAuthorized;
+
+    const existingToken = getBackendToken();
+    if (existingToken) {
+        STATE.authChecked = true;
+        STATE.isAuthorized = true;
+        return true;
     }
+
+    if (!STATE.authPromise) {
+        STATE.authPromise = validateUserAccess().finally(() => {
+            STATE.authPromise = null;
+        });
+    }
+
+    return STATE.authPromise;
+}
 
     function updateAuthStatus() {
         const statusEl = W.document.getElementById("loadout-auth-status");
@@ -458,19 +467,29 @@
         return res.data.loadout;
     }
 
-    async function fetchAndRenderLoadout(force = false) {
-        const authorized = await ensureAuthorized();
+async function fetchAndRenderLoadout(force = false) {
+    let authorized = await ensureAuthorized();
+    updateAuthStatus();
+    if (!authorized) return;
+
+    const targetId = currentTargetId();
+    if (!targetId) return;
+
+    let res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
+
+    if (res.status === 401) {
+        resetAuthorizationState();
+        authorized = await ensureAuthorized();
         updateAuthStatus();
         if (!authorized) return;
 
-        const targetId = currentTargetId();
-        if (!targetId) return;
-
-        const row = await getLatestLoadout(targetId);
-        if (row?.loadout) {
-            renderLoadout(row.loadout, row.inserted_at, force);
-        }
+        res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
     }
+
+    if (!res.ok || !res.data?.ok || !res.data?.loadout) return;
+
+    renderLoadout(res.data.loadout.loadout, res.data.loadout.inserted_at, force);
+}
 
     function queryFirst(root, selectors) {
         for (const s of selectors) {
