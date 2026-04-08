@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.6.0
+// @version      3.6.2
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
-// @match        https://www.torn.com/loader.php?sid=attack&user2ID=*
+// @match        https://www.torn.com/page.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      askelads.grusmedia.no
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.5.1";
+    const SCRIPT_VERSION = "3.6.2";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -1299,6 +1299,7 @@
         }
 
         STATE.attackData = db;
+        W.attackDataDebug = db;
 
         if (!hadFightID && db.fightID) {
             cleanupScriptOverlays();
