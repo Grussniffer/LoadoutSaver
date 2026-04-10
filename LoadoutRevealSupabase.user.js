@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.6.2
+// @version      3.6.4
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
@@ -17,13 +17,14 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.6.2";
+    const SCRIPT_VERSION = "3.6.4";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
     const CFG = {
         apiBaseUrl: "https://askelads.grusmedia.no/loadout-api",
         historyLimit: 10,
+        cacheTtlMs: 5 * 60 * 1000,
         store: {
             apiKey: "loadout_loader_api_key",
             backendToken: "loadout_loader_backend_token",
@@ -128,6 +129,62 @@
 
         obs.observe(W.document.documentElement, { childList: true, subtree: true });
         const timer = W.setTimeout(() => obs.disconnect(), timeout);
+    }
+
+    function sessionCacheGet(key, ttlMs) {
+        try {
+            const raw = sessionStorage.getItem(key);
+            if (!raw) return null;
+
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object" || !parsed.cachedAt || !("data" in parsed)) {
+                sessionStorage.removeItem(key);
+                return null;
+            }
+
+            if (Date.now() - parsed.cachedAt > ttlMs) {
+                sessionStorage.removeItem(key);
+                return null;
+            }
+
+            return parsed.data;
+        } catch {
+            try { sessionStorage.removeItem(key); } catch {}
+            return null;
+        }
+    }
+
+    function sessionCacheSet(key, data) {
+        try {
+            sessionStorage.setItem(key, JSON.stringify({
+                cachedAt: Date.now(),
+                data
+            }));
+        } catch {}
+    }
+
+    function clearSessionCachePrefix(prefix) {
+        try {
+            for (let i = sessionStorage.length - 1; i >= 0; i--) {
+                const key = sessionStorage.key(i);
+                if (key && key.startsWith(prefix)) {
+                    sessionStorage.removeItem(key);
+                }
+            }
+        } catch {}
+    }
+
+    function latestCacheKey(defenderId) {
+        return `askelads:latest:${defenderId}`;
+    }
+
+    function historyCacheKey(defenderId, limit) {
+        return `askelads:history:${defenderId}:${limit}`;
+    }
+
+    function clearDefenderSessionCache(defenderId) {
+        clearSessionCachePrefix(`askelads:latest:${defenderId}`);
+        clearSessionCachePrefix(`askelads:history:${defenderId}:`);
     }
 
     function resetAuthorizationState() {
@@ -504,13 +561,22 @@
         return extractUserName(STATE.attackData?.defenderUser) || getPageDefenderName() || "Unknown";
     }
 
-    async function getLatestLoadout(targetId) {
+    async function getLatestLoadout(targetId, { forceRefresh = false } = {}) {
+        const cacheKey = latestCacheKey(targetId);
+
+        if (!forceRefresh) {
+            const cached = sessionCacheGet(cacheKey, CFG.cacheTtlMs);
+            if (cached) return cached;
+        }
+
         const res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
         if (!res.ok || !res.data?.ok || !res.data?.loadout) return null;
+
+        sessionCacheSet(cacheKey, res.data.loadout);
         return res.data.loadout;
     }
 
-    async function fetchAndRenderLoadout(force = false) {
+    async function fetchAndRenderLoadout(force = false, forceRefresh = false) {
         let authorized = await ensureAuthorized();
         updateAuthStatus();
         if (!authorized) return;
@@ -518,7 +584,7 @@
         const targetId = currentTargetId();
         if (!targetId) return;
 
-        let row = await getLatestLoadout(targetId);
+        let row = await getLatestLoadout(targetId, { forceRefresh });
 
         if (!row) {
             const directRes = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
@@ -529,9 +595,10 @@
                 updateAuthStatus();
                 if (!authorized) return;
 
-                row = await getLatestLoadout(targetId);
+                row = await getLatestLoadout(targetId, { forceRefresh: true });
             } else if (directRes.ok && directRes.data?.ok && directRes.data?.loadout) {
                 row = directRes.data.loadout;
+                sessionCacheSet(latestCacheKey(targetId), row);
             }
         }
 
@@ -575,9 +642,7 @@
 
     function buildSlotIcons(arr, key, name, desc) {
         return [0, 1].map(i => {
-            if (!arr?.[i]) {
-                return buildIconHtml(null, "", "");
-            }
+            if (!arr?.[i]) return buildIconHtml(null, "", "");
 
             const item = arr[i];
             const iconValue = key === "bonus_key"
@@ -684,7 +749,6 @@
         armorOverlay.className = "ll-armor-overlay ll-slot-overlay";
         armorOverlay.style.cssText = `position:absolute;inset:0;pointer-events:none;z-index:4;transform:translateY(${IS_PDA ? "10px" : "20px"});`;
 
-        const layerOrder = { 8: 10, 7: 11, 9: 12, 6: 13, 4: 14 };
         const frag = W.document.createDocumentFragment();
 
         for (const slot of [8, 7, 9, 6, 4]) {
@@ -693,7 +757,7 @@
 
             const container = W.document.createElement("div");
             container.className = "armourContainer___zL52C";
-            container.style.zIndex = String(layerOrder[slot]);
+            container.style.zIndex = String({ 8: 10, 7: 11, 9: 12, 6: 13, 4: 14 }[slot]);
 
             const armor = W.document.createElement("div");
             armor.className = "armour___fLnYY";
@@ -814,9 +878,7 @@
         const defenderFactionId = raw?.defenderUser?.factionID ?? null;
         const loadout = extractLoadoutFromAttackData(raw);
 
-        if (!attackerId || !defenderId || !loadout) {
-            return;
-        }
+        if (!attackerId || !defenderId || !loadout) return;
 
         const payload = {
             defender_id: defenderId,
@@ -843,13 +905,17 @@
         }
 
         if (res.ok && res.data?.ok) {
+            clearDefenderSessionCache(defenderId);
+            if (res.data.latest) {
+                sessionCacheSet(latestCacheKey(defenderId), res.data.latest);
+            }
             toastInfo("Loadout saved to the war chest.");
         } else {
             toast(res.data?.error || "Failed to save defender loadout.");
         }
     }
 
-    async function fetchHistoryForCurrentTarget() {
+    async function fetchHistoryForCurrentTarget({ forceRefresh = false } = {}) {
         let authorized = await ensureAuthorized();
         updateAuthStatus();
         if (!authorized) return [];
@@ -858,6 +924,13 @@
         if (!targetId) {
             toast("No defender detected on this page.", 4000);
             return [];
+        }
+
+        const cacheKey = historyCacheKey(targetId, CFG.historyLimit);
+
+        if (!forceRefresh) {
+            const cached = sessionCacheGet(cacheKey, CFG.cacheTtlMs);
+            if (cached) return cached;
         }
 
         let res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null, { auth: true });
@@ -872,6 +945,8 @@
         }
 
         if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
+
+        sessionCacheSet(cacheKey, res.data.history);
         return res.data.history;
     }
 
@@ -902,7 +977,7 @@
         `;
     }
 
-    async function showHistoryModal() {
+    async function showHistoryModal(forceRefresh = false) {
         if (STATE.historyOpen) {
             closeHistoryModal();
             return;
@@ -954,11 +1029,25 @@
             </div>
         `;
 
+        const controls = W.document.createElement("div");
+        controls.style.cssText = "display:flex;gap:6px;";
+
+        const refreshBtn = W.document.createElement("button");
+        refreshBtn.textContent = "Refresh";
+        refreshBtn.style.cssText = askeladsButtonStyle("steel");
+        refreshBtn.onclick = () => {
+            closeHistoryModal();
+            showHistoryModal(true);
+        };
+
         const closeBtn = W.document.createElement("button");
         closeBtn.textContent = "Close";
         closeBtn.style.cssText = askeladsButtonStyle("red");
         closeBtn.onclick = closeHistoryModal;
-        header.appendChild(closeBtn);
+
+        controls.appendChild(refreshBtn);
+        controls.appendChild(closeBtn);
+        header.appendChild(controls);
 
         const body = W.document.createElement("div");
         body.style.cssText = "padding:12px;overflow:auto;display:flex;flex-direction:column;gap:8px;";
@@ -974,7 +1063,7 @@
 
         W.document.body.appendChild(overlay);
 
-        const rows = await fetchHistoryForCurrentTarget();
+        const rows = await fetchHistoryForCurrentTarget({ forceRefresh });
 
         if (!STATE.historyOpen) return;
         body.innerHTML = "";
@@ -1181,11 +1270,11 @@
         };
 
         panel.querySelector("#loadout-show-history-btn").onclick = () => {
-            showHistoryModal();
+            showHistoryModal(false);
         };
 
         panel.querySelector("#loadout-show-latest-btn").onclick = () => {
-            fetchAndRenderLoadout(true);
+            fetchAndRenderLoadout(true, true);
         };
 
         if (!IS_PDA) {
@@ -1206,7 +1295,7 @@
 
                 if (ok) {
                     toastInfo("Key saved. Welcome back to the war room.");
-                    fetchAndRenderLoadout(true);
+                    fetchAndRenderLoadout(true, true);
                 }
             };
 
@@ -1309,7 +1398,7 @@
             STATE.uploaded = true;
             whenVisible(() => reportLoadout(db));
         } else if (isFirstData) {
-            fetchAndRenderLoadout(true);
+            fetchAndRenderLoadout(true, false);
         }
     }
 
