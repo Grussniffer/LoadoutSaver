@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.6.4
+// @version      3.6.5
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.6.4";
+    const SCRIPT_VERSION = "3.6.5";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -25,6 +25,7 @@
         apiBaseUrl: "https://askelads.grusmedia.no/loadout-api",
         historyLimit: 10,
         cacheTtlMs: 5 * 60 * 1000,
+        tokenRefreshWindowMs: 10 * 60 * 1000,
         store: {
             apiKey: "loadout_loader_api_key",
             backendToken: "loadout_loader_backend_token",
@@ -205,6 +206,33 @@
         W.document.querySelectorAll(".ll-slot-overlay, .ll-armor-overlay, .ll-armor-map").forEach(el => el.remove());
     }
 
+    function parseJwtPayload(token) {
+        try {
+            const parts = String(token || "").split(".");
+            if (parts.length < 2) return null;
+            const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+            const padded = base64 + "=".repeat((4 - base64.length % 4) % 4);
+            return JSON.parse(atob(padded));
+        } catch {
+            return null;
+        }
+    }
+
+    function parseJwtExpMs(token) {
+        const payload = parseJwtPayload(token);
+        return typeof payload?.exp === "number" ? payload.exp * 1000 : 0;
+    }
+
+    function tokenNeedsRefresh(token) {
+        const expMs = parseJwtExpMs(token);
+        if (!expMs) return true;
+        return Date.now() >= (expMs - CFG.tokenRefreshWindowMs);
+    }
+
+    function tokenLooksUsable(token) {
+        return !!token && !tokenNeedsRefresh(token);
+    }
+
     function toast(message, duration = 10000) {
         const host = W.document.getElementById("loadout-toast-host");
         if (!host) return;
@@ -298,6 +326,24 @@
                 data: parseJson(await r.text())
             }))
             .catch(() => ({ ok: false, status: 0, data: null }));
+    }
+
+    async function authorizedRequest(method, path, body) {
+        let authorized = await ensureAuthorized(false);
+        updateAuthStatus();
+        if (!authorized) return { ok: false, status: 401, data: { error: "Not authorized" } };
+
+        let res = await apiRequest(method, path, body, { auth: true });
+
+        if (res.status === 401) {
+            resetAuthorizationState();
+            authorized = await ensureAuthorized(true);
+            updateAuthStatus();
+            if (!authorized) return res;
+            res = await apiRequest(method, path, body, { auth: true });
+        }
+
+        return res;
     }
 
     function extractUserId(user) {
@@ -485,7 +531,6 @@
         const res = await apiRequest("POST", "/api/auth/torn", { apiKey }, { auth: false });
 
         if (!res.ok || !res.data?.ok || !res.data?.token) {
-            toast(res.data?.error || "Failed to authenticate with backend", 5000);
             STATE.authChecked = true;
             STATE.isAuthorized = false;
             STATE.userInfo = null;
@@ -500,14 +545,21 @@
         return true;
     }
 
-    async function ensureAuthorized() {
-        if (STATE.authChecked) return STATE.isAuthorized;
+    async function ensureAuthorized(forceRefresh = false) {
+        if (!forceRefresh && STATE.authChecked && STATE.isAuthorized) {
+            const existing = getBackendToken();
+            if (tokenLooksUsable(existing)) {
+                return true;
+            }
+        }
 
-        const existingToken = getBackendToken();
-        if (existingToken) {
-            STATE.authChecked = true;
-            STATE.isAuthorized = true;
-            return true;
+        if (!forceRefresh) {
+            const existing = getBackendToken();
+            if (tokenLooksUsable(existing)) {
+                STATE.authChecked = true;
+                STATE.isAuthorized = true;
+                return true;
+            }
         }
 
         if (!STATE.authPromise) {
@@ -529,7 +581,8 @@
             return;
         }
 
-        if (!STATE.authChecked && getBackendToken()) {
+        const token = getBackendToken();
+        if (tokenLooksUsable(token)) {
             statusEl.textContent = "Authorization: Session active";
             statusEl.style.color = "#9fd09c";
             return;
@@ -569,7 +622,7 @@
             if (cached) return cached;
         }
 
-        const res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
+        const res = await authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null);
         if (!res.ok || !res.data?.ok || !res.data?.loadout) return null;
 
         sessionCacheSet(cacheKey, res.data.loadout);
@@ -577,31 +630,14 @@
     }
 
     async function fetchAndRenderLoadout(force = false, forceRefresh = false) {
-        let authorized = await ensureAuthorized();
+        const authorized = await ensureAuthorized(false);
         updateAuthStatus();
         if (!authorized) return;
 
         const targetId = currentTargetId();
         if (!targetId) return;
 
-        let row = await getLatestLoadout(targetId, { forceRefresh });
-
-        if (!row) {
-            const directRes = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
-
-            if (directRes.status === 401) {
-                resetAuthorizationState();
-                authorized = await ensureAuthorized();
-                updateAuthStatus();
-                if (!authorized) return;
-
-                row = await getLatestLoadout(targetId, { forceRefresh: true });
-            } else if (directRes.ok && directRes.data?.ok && directRes.data?.loadout) {
-                row = directRes.data.loadout;
-                sessionCacheSet(latestCacheKey(targetId), row);
-            }
-        }
-
+        const row = await getLatestLoadout(targetId, { forceRefresh });
         if (row?.loadout) {
             renderLoadout(row.loadout, row.inserted_at, force);
         }
@@ -867,10 +903,6 @@
     }
 
     async function reportLoadout(raw) {
-        const authorized = await ensureAuthorized();
-        updateAuthStatus();
-        if (!authorized) return;
-
         const attackerId = extractUserId(raw?.attackerUser);
         const defenderId = extractUserId(raw?.defenderUser);
         const attackerName = extractUserName(raw?.attackerUser) || getPageAttackerName();
@@ -889,20 +921,8 @@
             loadout
         };
 
-        let res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
-
-        if (res.status === 401) {
-            resetAuthorizationState();
-            const reauthed = await ensureAuthorized();
-            updateAuthStatus();
-
-            if (!reauthed) {
-                toast("Backend session expired. Save your API key again.");
-                return;
-            }
-
-            res = await apiRequest("POST", "/api/loadouts/report", payload, { auth: true });
-        }
+        const res = await authorizedRequest("POST", "/api/loadouts/report", payload);
+        updateAuthStatus();
 
         if (res.ok && res.data?.ok) {
             clearDefenderSessionCache(defenderId);
@@ -916,7 +936,7 @@
     }
 
     async function fetchHistoryForCurrentTarget({ forceRefresh = false } = {}) {
-        let authorized = await ensureAuthorized();
+        const authorized = await ensureAuthorized(false);
         updateAuthStatus();
         if (!authorized) return [];
 
@@ -933,16 +953,8 @@
             if (cached) return cached;
         }
 
-        let res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null, { auth: true });
-
-        if (res.status === 401) {
-            resetAuthorizationState();
-            authorized = await ensureAuthorized();
-            updateAuthStatus();
-            if (!authorized) return [];
-
-            res = await apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null, { auth: true });
-        }
+        const res = await authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null);
+        updateAuthStatus();
 
         if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
 
@@ -1290,12 +1302,14 @@
                 setLocalStorage(CFG.store.apiKey, key);
                 resetAuthorizationState();
 
-                const ok = await ensureAuthorized();
+                const ok = await ensureAuthorized(true);
                 updateAuthStatus();
 
                 if (ok) {
                     toastInfo("Key saved. Welcome back to the war room.");
                     fetchAndRenderLoadout(true, true);
+                } else {
+                    toast("Failed to authenticate with backend.");
                 }
             };
 
@@ -1335,7 +1349,7 @@
 
     async function testBackendAuth() {
         resetAuthorizationState();
-        const ok = await ensureAuthorized();
+        const ok = await ensureAuthorized(true);
         updateAuthStatus();
         toast(ok ? "Backend auth successful." : "Backend auth failed.");
         return ok;
@@ -1349,7 +1363,7 @@
             toast("No defender detected.");
             return null;
         }
-        return apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null, { auth: true });
+        return authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null);
     }
 
     W.testBackendLatest = testBackendLatest;
@@ -1360,7 +1374,7 @@
             toast("No defender detected.");
             return null;
         }
-        return apiRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=5`, null, { auth: true });
+        return authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=5`, null);
     }
 
     W.testBackendHistory = testBackendHistory;
@@ -1438,7 +1452,7 @@
             panel.style.display = "block";
             toast("Enter your Public API key to join the war room.");
         } else {
-            ensureAuthorized().then(updateAuthStatus);
+            ensureAuthorized(false).then(updateAuthStatus);
         }
 
         updateAuthStatus();
