@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.6.5
+// @version      3.7.0
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
@@ -17,14 +17,16 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.6.5";
+    const SCRIPT_VERSION = "3.7.0";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
     const CFG = {
         apiBaseUrl: "https://askelads.grusmedia.no/loadout-api",
         historyLimit: 10,
-        cacheTtlMs: 5 * 60 * 1000,
+        cacheMaxAgeMs: 24 * 60 * 60 * 1000,
+        latestRevalidateAfterMs: 5 * 60 * 1000,
+        historyRevalidateAfterMs: 10 * 60 * 1000,
         tokenRefreshWindowMs: 10 * 60 * 1000,
         store: {
             apiKey: "loadout_loader_api_key",
@@ -41,7 +43,9 @@
         isAuthorized: false,
         userInfo: null,
         authPromise: null,
-        historyOpen: false
+        historyOpen: false,
+        latestRevalidateInFlight: new Set(),
+        historyRevalidateInFlight: new Set()
     };
 
     function getLocalStorage(key) {
@@ -132,7 +136,7 @@
         const timer = W.setTimeout(() => obs.disconnect(), timeout);
     }
 
-    function sessionCacheGet(key, ttlMs) {
+    function sessionCacheGetEntry(key) {
         try {
             const raw = sessionStorage.getItem(key);
             if (!raw) return null;
@@ -143,16 +147,23 @@
                 return null;
             }
 
-            if (Date.now() - parsed.cachedAt > ttlMs) {
-                sessionStorage.removeItem(key);
-                return null;
-            }
-
-            return parsed.data;
+            return parsed;
         } catch {
             try { sessionStorage.removeItem(key); } catch {}
             return null;
         }
+    }
+
+    function sessionCacheGet(key, maxAgeMs) {
+        const entry = sessionCacheGetEntry(key);
+        if (!entry) return null;
+
+        if (Date.now() - entry.cachedAt > maxAgeMs) {
+            try { sessionStorage.removeItem(key); } catch {}
+            return null;
+        }
+
+        return entry.data;
     }
 
     function sessionCacheSet(key, data) {
@@ -548,9 +559,7 @@
     async function ensureAuthorized(forceRefresh = false) {
         if (!forceRefresh && STATE.authChecked && STATE.isAuthorized) {
             const existing = getBackendToken();
-            if (tokenLooksUsable(existing)) {
-                return true;
-            }
+            if (tokenLooksUsable(existing)) return true;
         }
 
         if (!forceRefresh) {
@@ -614,19 +623,44 @@
         return extractUserName(STATE.attackData?.defenderUser) || getPageDefenderName() || "Unknown";
     }
 
-    async function getLatestLoadout(targetId, { forceRefresh = false } = {}) {
-        const cacheKey = latestCacheKey(targetId);
-
-        if (!forceRefresh) {
-            const cached = sessionCacheGet(cacheKey, CFG.cacheTtlMs);
-            if (cached) return cached;
+    function deepEqualJson(a, b) {
+        try {
+            return JSON.stringify(a) === JSON.stringify(b);
+        } catch {
+            return false;
         }
+    }
 
+    async function fetchLatestFromBackend(targetId) {
         const res = await authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null);
+        updateAuthStatus();
         if (!res.ok || !res.data?.ok || !res.data?.loadout) return null;
-
-        sessionCacheSet(cacheKey, res.data.loadout);
         return res.data.loadout;
+    }
+
+    async function silentRevalidateLatest(targetId, renderedCacheEntry = null) {
+        const id = String(targetId);
+        if (STATE.latestRevalidateInFlight.has(id)) return;
+        STATE.latestRevalidateInFlight.add(id);
+
+        try {
+            const fresh = await fetchLatestFromBackend(targetId);
+            if (!fresh?.loadout) return;
+
+            const currentCached = renderedCacheEntry || sessionCacheGetEntry(latestCacheKey(targetId));
+            const previousData = currentCached?.data || null;
+
+            sessionCacheSet(latestCacheKey(targetId), fresh);
+
+            if (!previousData || !deepEqualJson(previousData, fresh)) {
+                if (currentTargetId() === Number(id) || String(currentTargetId()) === id) {
+                    STATE.loadoutRendered = false;
+                    renderLoadout(fresh.loadout, fresh.inserted_at, true);
+                }
+            }
+        } finally {
+            STATE.latestRevalidateInFlight.delete(id);
+        }
     }
 
     async function fetchAndRenderLoadout(force = false, forceRefresh = false) {
@@ -637,10 +671,78 @@
         const targetId = currentTargetId();
         if (!targetId) return;
 
-        const row = await getLatestLoadout(targetId, { forceRefresh });
-        if (row?.loadout) {
-            renderLoadout(row.loadout, row.inserted_at, force);
+        const cacheKey = latestCacheKey(targetId);
+
+        if (!forceRefresh) {
+            const entry = sessionCacheGetEntry(cacheKey);
+            if (entry && (Date.now() - entry.cachedAt) <= CFG.cacheMaxAgeMs && entry.data?.loadout) {
+                renderLoadout(entry.data.loadout, entry.data.inserted_at, force);
+
+                if ((Date.now() - entry.cachedAt) >= CFG.latestRevalidateAfterMs) {
+                    void silentRevalidateLatest(targetId, entry);
+                }
+                return;
+            }
         }
+
+        const fresh = await fetchLatestFromBackend(targetId);
+        if (fresh?.loadout) {
+            sessionCacheSet(cacheKey, fresh);
+            renderLoadout(fresh.loadout, fresh.inserted_at, force);
+        }
+    }
+
+    async function fetchHistoryFromBackend(targetId) {
+        const res = await authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null);
+        updateAuthStatus();
+        if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
+        return res.data.history;
+    }
+
+    async function silentRevalidateHistory(targetId) {
+        const key = `${targetId}:${CFG.historyLimit}`;
+        if (STATE.historyRevalidateInFlight.has(key)) return;
+        STATE.historyRevalidateInFlight.add(key);
+
+        try {
+            const fresh = await fetchHistoryFromBackend(targetId);
+            if (!Array.isArray(fresh)) return;
+            sessionCacheSet(historyCacheKey(targetId, CFG.historyLimit), fresh);
+        } finally {
+            STATE.historyRevalidateInFlight.delete(key);
+        }
+    }
+
+    async function fetchHistoryForCurrentTarget({ forceRefresh = false } = {}) {
+        const authorized = await ensureAuthorized(false);
+        updateAuthStatus();
+        if (!authorized) return [];
+
+        const targetId = currentTargetId();
+        if (!targetId) {
+            toast("No defender detected on this page.", 4000);
+            return [];
+        }
+
+        const cacheKey = historyCacheKey(targetId, CFG.historyLimit);
+
+        if (!forceRefresh) {
+            const entry = sessionCacheGetEntry(cacheKey);
+            if (entry && (Date.now() - entry.cachedAt) <= CFG.cacheMaxAgeMs && Array.isArray(entry.data)) {
+                if ((Date.now() - entry.cachedAt) >= CFG.historyRevalidateAfterMs) {
+                    void silentRevalidateHistory(targetId);
+                }
+                return entry.data;
+            }
+        }
+
+        const fresh = await fetchHistoryFromBackend(targetId);
+        if (Array.isArray(fresh)) {
+            sessionCacheSet(cacheKey, fresh);
+            return fresh;
+        }
+
+        return [];
     }
 
     function queryFirst(root, selectors) {
@@ -935,60 +1037,6 @@
         }
     }
 
-    async function fetchHistoryForCurrentTarget({ forceRefresh = false } = {}) {
-        const authorized = await ensureAuthorized(false);
-        updateAuthStatus();
-        if (!authorized) return [];
-
-        const targetId = currentTargetId();
-        if (!targetId) {
-            toast("No defender detected on this page.", 4000);
-            return [];
-        }
-
-        const cacheKey = historyCacheKey(targetId, CFG.historyLimit);
-
-        if (!forceRefresh) {
-            const cached = sessionCacheGet(cacheKey, CFG.cacheTtlMs);
-            if (cached) return cached;
-        }
-
-        const res = await authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null);
-        updateAuthStatus();
-
-        if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
-
-        sessionCacheSet(cacheKey, res.data.history);
-        return res.data.history;
-    }
-
-    function closeHistoryModal() {
-        const modal = W.document.getElementById("loadout-history-modal");
-        if (modal) modal.remove();
-        STATE.historyOpen = false;
-    }
-
-    function askeladsButtonStyle(kind = "gold") {
-        const styles = {
-            gold: "padding:7px 10px;border:1px solid rgba(191,145,63,0.35);border-radius:10px;background:linear-gradient(180deg,#4f3a17,#2d2010);color:#f4e7c2;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);",
-            green: "padding:7px 10px;border:1px solid rgba(91,135,84,0.35);border-radius:10px;background:linear-gradient(180deg,#294126,#182718);color:#d9f0d4;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);",
-            red: "padding:7px 10px;border:1px solid rgba(140,54,54,0.35);border-radius:10px;background:linear-gradient(180deg,#4a1f1f,#291212);color:#ffd6d6;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);",
-            steel: "padding:7px 10px;border:1px solid rgba(130,130,130,0.22);border-radius:10px;background:linear-gradient(180deg,#2a2d31,#181a1d);color:#e7e7e7;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.04);",
-            bright: "padding:7px 10px;border:1px solid rgba(191,145,63,0.42);border-radius:10px;background:linear-gradient(180deg,#7b5a24,#4f3815);color:#fff3d4;cursor:pointer;font-weight:800;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08);"
-        };
-        return styles[kind] || styles.gold;
-    }
-
-    function getApiKeyHelpHtml() {
-        return `
-            <div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(191,145,63,0.15);color:#d7cfbf;font-size:11px;line-height:1.45;">
-                This tool uses your <b style="color:#f4e7c2;">Torn Public API key</b> only to identify your player and faction and authenticate with the Askelads backend.
-                It does <b>not</b> require full-access account data.
-                You can create or revoke a public key any time in Torn settings.
-            </div>
-        `;
-    }
-
     async function showHistoryModal(forceRefresh = false) {
         if (STATE.historyOpen) {
             closeHistoryModal();
@@ -1136,6 +1184,33 @@
             item.appendChild(actions);
             body.appendChild(item);
         });
+    }
+
+    function closeHistoryModal() {
+        const modal = W.document.getElementById("loadout-history-modal");
+        if (modal) modal.remove();
+        STATE.historyOpen = false;
+    }
+
+    function askeladsButtonStyle(kind = "gold") {
+        const styles = {
+            gold: "padding:7px 10px;border:1px solid rgba(191,145,63,0.35);border-radius:10px;background:linear-gradient(180deg,#4f3a17,#2d2010);color:#f4e7c2;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);",
+            green: "padding:7px 10px;border:1px solid rgba(91,135,84,0.35);border-radius:10px;background:linear-gradient(180deg,#294126,#182718);color:#d9f0d4;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);",
+            red: "padding:7px 10px;border:1px solid rgba(140,54,54,0.35);border-radius:10px;background:linear-gradient(180deg,#4a1f1f,#291212);color:#ffd6d6;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);",
+            steel: "padding:7px 10px;border:1px solid rgba(130,130,130,0.22);border-radius:10px;background:linear-gradient(180deg,#2a2d31,#181a1d);color:#e7e7e7;cursor:pointer;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,0.04);",
+            bright: "padding:7px 10px;border:1px solid rgba(191,145,63,0.42);border-radius:10px;background:linear-gradient(180deg,#7b5a24,#4f3815);color:#fff3d4;cursor:pointer;font-weight:800;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08);"
+        };
+        return styles[kind] || styles.gold;
+    }
+
+    function getApiKeyHelpHtml() {
+        return `
+            <div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(191,145,63,0.15);color:#d7cfbf;font-size:11px;line-height:1.45;">
+                This tool uses your <b style="color:#f4e7c2;">Torn Public API key</b> only to identify your player and faction and authenticate with the Askelads backend.
+                It does <b>not</b> require full-access account data.
+                You can create or revoke a public key any time in Torn settings.
+            </div>
+        `;
     }
 
     function openTornPublicApiKeyPage() {
