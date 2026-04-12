@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.1
+// @version      3.7.2
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.7.0";
+    const SCRIPT_VERSION = "3.7.1";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -1272,13 +1272,13 @@
             panel.style.top = "10px";
             panel.style.left = "10px";
             panel.style.right = "10px";
+            panel.style.bottom = "auto";
             panel.style.width = "auto";
             panel.style.maxWidth = "none";
             panel.style.maxHeight = "75vh";
             panel.style.transform = "none";
             panel.style.padding = "10px";
             panel.style.margin = "0";
-            panel.style.bottom = "auto";
         }
 
         const savedKey = getAPIKey();
@@ -1302,12 +1302,18 @@
         ;
 
         panel.innerHTML = `
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px;">
                 <div>
                     <div style="font-weight:800;font-size:16px;color:#f4e7c2;letter-spacing:.35px;">Askelads Loadout</div>
                     <div style="font-size:11px;color:#b8a786;">War-room viewer and recorder</div>
                 </div>
-                <div style="font-size:11px;color:#8f836f;">v${SCRIPT_VERSION}</div>
+
+                <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                    <div style="font-size:11px;color:#8f836f;">v${SCRIPT_VERSION}</div>
+                    <button id="loadout-close-panel-btn" style="${askeladsButtonStyle("red")}padding:4px 8px;font-size:11px;">
+                        Close
+                    </button>
+                </div>
             </div>
 
             ${pdaKeyControls}
@@ -1354,11 +1360,16 @@
         };
 
         W.document.addEventListener("click", (e) => {
-            if (panelOpen && !host.contains(e.target)) {
+            if (panelOpen && !host.contains(e.target) && !panel.contains(e.target)) {
                 panelOpen = false;
                 panel.style.display = "none";
             }
         });
+
+        panel.querySelector("#loadout-close-panel-btn").onclick = () => {
+            panelOpen = false;
+            panel.style.display = "none";
+        };
 
         panel.querySelector("#loadout-quiet-chk").onchange = (e) => {
             setLocalStorage(CFG.store.quietToasts, e.target.checked ? "1" : "0");
