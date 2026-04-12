@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.0
+// @version      3.7.1
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
@@ -1268,9 +1268,17 @@
         ].join(";");
 
         if (IS_PDA) {
-            panel.style.left = "0";
+            panel.style.position = "fixed";
+            panel.style.top = "10px";
+            panel.style.left = "10px";
+            panel.style.right = "10px";
+            panel.style.width = "auto";
+            panel.style.maxWidth = "none";
+            panel.style.maxHeight = "75vh";
             panel.style.transform = "none";
             panel.style.padding = "10px";
+            panel.style.margin = "0";
+            panel.style.bottom = "auto";
         }
 
         const savedKey = getAPIKey();
