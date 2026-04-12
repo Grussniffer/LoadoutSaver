@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.3
+// @version      3.7.4
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.7.1";
+    const SCRIPT_VERSION = "3.7.4";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
