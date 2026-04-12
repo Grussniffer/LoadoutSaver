@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.2
+// @version      3.7.3
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
