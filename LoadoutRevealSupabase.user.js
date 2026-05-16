@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.4
+// @version      3.7.6
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
@@ -17,7 +17,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.7.4";
+    const SCRIPT_VERSION = "3.7.6";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -214,7 +214,9 @@
     }
 
     function cleanupScriptOverlays() {
-        W.document.querySelectorAll(".ll-slot-overlay, .ll-armor-overlay, .ll-armor-map").forEach(el => el.remove());
+        W.document
+            .querySelectorAll(".ll-slot-overlay, .ll-armor-overlay, .ll-armor-layer, .ll-armor-map")
+            .forEach(el => el.remove());
     }
 
     function parseJwtPayload(token) {
@@ -509,6 +511,7 @@
             accuracy: raw?.acc != null ? Number(raw.acc) : raw?.accuracy != null ? Number(raw.accuracy) : null,
             rarity: mapGlowClassToRarity(raw?.glowClass || raw?.rarity || ""),
             ammo_type: extractAmmoType(raw),
+            clip_size: raw?.clip_size ?? raw?.clipSize ?? raw?.clipsize ?? raw?.clip ?? null,
             mods: normalizeMods(raw?.currentUpgrades || raw?.mods || raw?.attachments || []),
             bonuses: normalizeBonuses(raw?.currentBonuses || raw?.bonuses || [])
         };
@@ -775,7 +778,7 @@
     function buildIconHtml(icon, title, desc) {
         const safeIcon = icon || "blank-bonus-25";
         const tooltip = escapeHtml([title, desc].filter(Boolean).join(" - "));
-        return `<div class="container___LAqaj" title="${tooltip}"><i class="bonus-attachment-${safeIcon}" title="${tooltip}"></i></div>`;
+        return `<div class="container___dxksw" title="${tooltip}"><i class="bonus-attachment-${safeIcon}" title="${tooltip}"></i></div>`;
     }
 
     function buildSlotIcons(arr, key, name, desc) {
@@ -791,7 +794,65 @@
         }).join("");
     }
 
-    const INFINITY_SVG = `<span class="eternity___QmjtV"><svg xmlns="http://www.w3.org/2000/svg" width="17" height="10" viewBox="0 0 17 10"><g><path d="M 12.3399 1.5 C 10.6799 1.5 9.64995 2.76 8.50995 3.95 C 7.35995 2.76 6.33995 1.5 4.66995 1.5 C 2.89995 1.51 1.47995 2.95 1.48995 4.72 C 1.48995 4.81 1.48995 4.91 1.49995 5 C 1.32995 6.76 2.62995 8.32 4.38995 8.49 C 4.47995 8.49 4.57995 8.5 4.66995 8.5 C 6.32995 8.5 7.35995 7.24 8.49995 6.05 C 9.64995 7.24 10.67 8.5 12.33 8.5 C 14.0999 8.49 15.5199 7.05 15.5099 5.28 C 15.5099 5.19 15.5099 5.09 15.4999 5 C 15.6699 3.24 14.3799 1.68 12.6199 1.51 C 12.5299 1.51 12.4299 1.5 12.3399 1.5 Z M 4.66995 7.33 C 3.52995 7.33 2.61995 6.4 2.61995 5.26 C 2.61995 5.17 2.61995 5.09 2.63995 5 C 2.48995 3.87 3.27995 2.84 4.40995 2.69 C 4.49995 2.68 4.57995 2.67 4.66995 2.67 C 6.01995 2.67 6.83995 3.87 7.79995 5 C 6.83995 6.14 6.01995 7.33 4.66995 7.33 Z M 12.3399 7.33 C 10.99 7.33 10.17 6.13 9.20995 5 C 10.17 3.86 10.99 2.67 12.3399 2.67 C 13.48 2.67 14.3899 3.61 14.3899 4.74 C 14.3899 4.83 14.3899 4.91 14.3699 5 C 14.5199 6.13 13.7299 7.16 12.5999 7.31 C 12.5099 7.32 12.4299 7.33 12.3399 7.33 Z" stroke-width="0"></path></g></svg></span>`;
+    const SILHOUETTES = {
+        1: "primary",
+        2: "secondary",
+        3: "melee",
+        5: "temporary"
+    };
+
+    const ARMOR_LAYER_ORDER = {
+        8: 10,
+        7: 11,
+        9: 12,
+        6: 13,
+        4: 14
+    };
+
+    const ARMOR_SLOT_AREAS = {
+        4: [{ coords: "119,79,99,73,80,96,62,131,54,150,52,167,62,169,79,138,91,118,99,142,95,159,143,161,144,143,148,118,162,141,174,166,187,165,176,129,162,95,140,75" }],
+        6: [{ coords: "118,77,104,67,99,52,104,36,118,26,132,32,136,51,133,69" }],
+        7: [{ coords: "94,162,145,162,157,204,154,239,150,261,156,275,150,301,136,303,131,283,121,209,109,284,105,300,89,299,85,276,87,257,84,236,85,201" }],
+        8: [
+            { coords: "87,300,89,322,86,336,78,349,88,354,99,354,104,340,106,325,105,302" },
+            { coords: "136,304,153,300,151,318,153,330,160,343,153,352,138,353,132,330" }
+        ],
+        9: [
+            { coords: "48,203,55,192,62,195,67,192,61,172,50,169,44,183,40,203" },
+            { coords: "175,171,189,170,196,185,198,200,191,202,184,191,177,196,176,180" }
+        ]
+    };
+
+    const INFINITY_SVG = `<span class="eternity___zfACp"><svg xmlns="http://www.w3.org/2000/svg" width="17" height="10" viewBox="0 0 17 10"><g><path d="M 12.3399 1.5 C 10.6799 1.5 9.64995 2.76 8.50995 3.95 C 7.35995 2.76 6.33995 1.5 4.66995 1.5 C 2.89995 1.51 1.47995 2.95 1.48995 4.72 C 1.48995 4.81 1.48995 4.91 1.49995 5 C 1.32995 6.76 2.62995 8.32 4.38995 8.49 C 4.47995 8.49 4.57995 8.5 4.66995 8.5 C 6.32995 8.5 7.35995 7.24 8.49995 6.05 C 9.64995 7.24 10.67 8.5 12.33 8.5 C 14.0999 8.49 15.5199 7.05 15.5099 5.28 C 15.5099 5.19 15.5099 5.09 15.4999 5 C 15.6699 3.24 14.3799 1.68 12.6199 1.51 C 12.5299 1.51 12.4299 1.5 12.3399 1.5 Z M 4.66995 7.33 C 3.52995 7.33 2.61995 6.4 2.61995 5.26 C 2.61995 5.17 2.61995 5.09 2.63995 5 C 2.48995 3.87 3.27995 2.84 4.40995 2.69 C 4.49995 2.68 4.57995 2.67 4.66995 2.67 C 6.01995 2.67 6.83995 3.87 7.79995 5 C 6.83995 6.14 6.01995 7.33 4.66995 7.33 Z M 12.3399 7.33 C 10.99 7.33 10.17 6.13 9.20995 5 C 10.17 3.86 10.99 2.67 12.3399 2.67 C 13.48 2.67 14.3899 3.61 14.3899 4.74 C 14.3899 4.83 14.3899 4.91 14.3699 5 C 14.5199 6.13 13.7299 7.16 12.5999 7.31 C 12.5099 7.32 12.4299 7.33 12.3399 7.33 Z" stroke-width="0"></path></g></svg></span>`;
+
+    function renderEmptySlot(wrapper, slot) {
+        if (!wrapper || !SILHOUETTES[slot]) return;
+
+        wrapper.querySelector(".ll-slot-overlay")?.remove();
+        wrapper.style.position = "relative";
+
+        const overlay = wrapper.cloneNode(true);
+        overlay.classList.add("ll-slot-overlay");
+        overlay.classList.remove(...[...overlay.classList].filter(c => /^glow-/.test(c) || /emptySlot/i.test(c)));
+        overlay.style.cssText += ";position:absolute;top:0;left:0;width:100%;height:100%;z-index:10;box-sizing:border-box;";
+
+        const border = queryFirst(overlay, ["[class*='itemBorder']"]);
+        if (border) border.className = "itemBorder___u_Tpv glow-default___RmCvA";
+
+        const img = queryFirst(overlay, ["[class*='weaponImage'] img", "img"]);
+        if (img) {
+            img.src = `/images/items/silhouettes/${SILHOUETTES[slot]}.svg`;
+            img.srcset = "";
+            img.classList.add("blank___W6Kh5");
+            img.style.objectFit = "";
+        }
+
+        queryFirst(overlay, ["[class*='top___']"])?.replaceChildren();
+        queryFirst(overlay, ["[class*='bottom___']"])?.replaceChildren();
+        overlay.querySelector(".ll-weapon-name")?.remove();
+
+        wrapper.appendChild(overlay);
+    }
 
     function renderSlot(wrapper, item, slotLabel, includeLabel = true, slot = 0) {
         if (!wrapper || !item) return;
@@ -800,6 +861,7 @@
 
         const overlay = wrapper.cloneNode(true);
         overlay.classList.add("ll-slot-overlay");
+        overlay.classList.remove(...[...overlay.classList].filter(c => /^glow-/.test(c) || /emptySlot/i.test(c)));
         overlay.style.cssText += ";position:absolute;top:0;left:0;width:100%;height:100%;z-index:10;box-sizing:border-box;";
         wrapper.style.position = "relative";
         wrapper.appendChild(overlay);
@@ -811,12 +873,12 @@
             red: "glow-red"
         };
 
-        const glow = rarityGlow[item.rarity] || "glow-default";
+        const glow = rarityGlow[item.rarity] || "glow-default___RmCvA";
         wrapper.classList.remove(...[...wrapper.classList].filter(c => /^glow-/.test(c)));
         wrapper.classList.add(glow);
 
         const border = queryFirst(wrapper, ["[class*='itemBorder']"]);
-        if (border) border.className = `itemBorder___mJGqQ ${glow}-border`;
+        if (border) border.className = `itemBorder___u_Tpv ${glow}-border`;
 
         const img = queryFirst(wrapper, ["[class*='weaponImage'] img", "img"]);
         if (img && item.item_id) {
@@ -824,7 +886,7 @@
             img.src = `${base}.png`;
             img.srcset = `${base}.png 1x, ${base}@2x.png 2x, ${base}@3x.png 3x, ${base}@4x.png 4x`;
             img.alt = item.item_name || "";
-            img.classList.remove("blank___RpGQA");
+            img.classList.remove("blank___W6Kh5");
             img.style.objectFit = "contain";
         }
 
@@ -834,33 +896,37 @@
             const bonusIcons = buildSlotIcons(item.bonuses, "bonus_key", "name", "description");
 
             top.innerHTML = includeLabel
-                ? `<div class="props___oL_Cw">${modIcons}</div>
-                   <div class="topMarker___OjRyU"><span class="markerText___HdlDL">${escapeHtml(slotLabel)}</span></div>
-                   <div class="props___oL_Cw">${bonusIcons}</div>`
-                : `<div class="props___oL_Cw">${modIcons}</div>
-                   <div class="props___oL_Cw">${bonusIcons}</div>`;
+                ? `<div class="props___O2Xnr">${modIcons}</div>
+                   <div class="topMarker___sECip"><span class="markerText___fXCwg">${escapeHtml(slotLabel)}</span></div>
+                   <div class="props___O2Xnr">${bonusIcons}</div>`
+                : `<div class="props___O2Xnr">${modIcons}</div>
+                   <div class="props___O2Xnr">${bonusIcons}</div>`;
         }
 
         const bottom = queryFirst(wrapper, ["[class*='bottom___']"]);
         if (bottom) {
             const ammoColorKey = (item.ammo_type || "").toLowerCase().replace(/\s+/g, "-");
             const ammoColor = `var(--attack-ammo-color-${ammoColorKey}, #ddd)`;
+            const spareMags = item.mods?.some(m => m.name === "Extra Magazines x2") ? 4 : item.mods?.some(m => m.name === "Extra Magazine") ? 3 : 2;
+            const clipSize = item.clip_size ?? "?";
 
             const ammoInner = slot === 3
                 ? INFINITY_SVG
                 : slot === 5
-                    ? `<span class="markerText___HdlDL standard___bW8M5">1</span>`
-                    : `<span class="markerText___HdlDL" style="color:${ammoColor}">${escapeHtml(item.ammo_type || "Unknown")}</span>`;
+                    ? `<span class="markerText___fXCwg standard___HC4M1">1</span>`
+                    : item.clip_size
+                        ? `<span class="markerText___fXCwg" style="color:${ammoColor}">${escapeHtml(clipSize)}/${escapeHtml(clipSize)} (${spareMags})</span>`
+                        : `<span class="markerText___fXCwg" style="color:${ammoColor}">${escapeHtml(item.ammo_type || "Unknown")}</span>`;
 
             bottom.innerHTML = `
-                <div class="props___oL_Cw">
+                <div class="props___O2Xnr">
                     <i class="bonus-attachment-item-damage-bonus" aria-label="Damage"></i>
-                    <span class="bonusInfo___vyqlT">${formatFixed2(item.damage)}</span>
+                    <span class="bonusInfo___tXGYA">${formatFixed2(item.damage)}</span>
                 </div>
-                <div class="bottomMarker___G1uDs">${ammoInner}</div>
-                <div class="props___oL_Cw">
+                <div class="bottomMarker___K5saZ">${ammoInner}</div>
+                <div class="props___O2Xnr">
                     <i class="bonus-attachment-item-accuracy-bonus" aria-label="Accuracy"></i>
-                    <span class="bonusInfo___vyqlT">${formatFixed2(item.accuracy)}</span>
+                    <span class="bonusInfo___tXGYA">${formatFixed2(item.accuracy)}</span>
                 </div>`;
         }
 
@@ -877,15 +943,49 @@
     }
 
     function renderArmor(defenderArea, loadout) {
-        const modelLayers = queryFirst(defenderArea, ["[class*='modelLayers']"]);
-        if (!modelLayers) return;
+        const bodyImg =
+            queryFirst(defenderArea, [
+                "[class*='bodyImage']",
+                "img[src*='body-m']",
+                "img[src*='body-f']",
+                "img[src*='model']"
+            ]) ||
+            queryFirst(W.document, [
+                "[class*='defender'] [class*='bodyImage']",
+                "[class*='defender'] img[src*='body-m']",
+                "[class*='defender'] img[src*='body-f']",
+                "[class*='playerArea']:nth-of-type(2) [class*='bodyImage']",
+                "[class*='playerArea']:nth-of-type(2) img[src*='body-m']",
+                "[class*='playerArea']:nth-of-type(2) img[src*='body-f']",
+                "[class*='bodyImage']",
+                "img[src*='body-m']",
+                "img[src*='body-f']",
+                "img[src*='model']"
+            ]);
 
-        modelLayers.querySelector(".ll-armor-overlay")?.remove();
+        if (!bodyImg) return;
+
+        const modelRoot =
+            bodyImg.closest("[class*='modelLayers'], [class*='model'], [class*='playerArea'], [class*='player___']") ||
+            defenderArea ||
+            W.document;
+
+        let armoursWrap =
+            queryFirst(modelRoot, ["[class*='armoursWrap']"]) ||
+            queryFirst(defenderArea, ["[class*='armoursWrap']"]);
+
+        if (!armoursWrap) {
+            const wraps = Array.from(W.document.querySelectorAll("[class*='armoursWrap']"));
+            armoursWrap = wraps[1] || wraps[0] || null;
+        }
+
+        if (!armoursWrap) return;
+
+        const src = bodyImg.getAttribute("src") || "";
+        const gender = /body-f[.@/]/.test(src) || src.includes("body-f") ? "f" : "m";
+
+        armoursWrap.querySelectorAll(".ll-armor-layer").forEach(el => el.remove());
         W.document.querySelector(".ll-armor-map")?.remove();
-
-        const armorOverlay = W.document.createElement("div");
-        armorOverlay.className = "ll-armor-overlay ll-slot-overlay";
-        armorOverlay.style.cssText = `position:absolute;inset:0;pointer-events:none;z-index:4;transform:translateY(${IS_PDA ? "10px" : "20px"});`;
 
         const frag = W.document.createDocumentFragment();
 
@@ -894,52 +994,40 @@
             if (!item) continue;
 
             const container = W.document.createElement("div");
-            container.className = "armourContainer___zL52C";
-            container.style.zIndex = String({ 8: 10, 7: 11, 9: 12, 6: 13, 4: 14 }[slot]);
+            container.className = "armourContainer___ftMzt ll-armor-layer ll-slot-overlay";
+            container.style.zIndex = String(ARMOR_LAYER_ORDER[slot]);
 
             const armor = W.document.createElement("div");
-            armor.className = "armour___fLnYY";
+            armor.className = "armour___wqLa7";
 
             const img = W.document.createElement("img");
-            img.className = "itemImg___B8FMH";
-            img.src = `https://www.torn.com/images/v2/items/model-items/${item.item_id}m.png`;
+            img.className = "itemImg___r9DqK";
+            img.src = `https://www.torn.com/images/v2/user_model/items/${item.item_id}${gender}.webp`;
             img.alt = "";
+
+            img.onerror = () => {
+                if (img.dataset.fallbackTried === "1") return;
+                img.dataset.fallbackTried = "1";
+                img.src = `https://www.torn.com/images/v2/items/model-items/${item.item_id}m.png`;
+            };
 
             armor.appendChild(img);
             container.appendChild(armor);
             frag.appendChild(container);
         }
 
-        armorOverlay.appendChild(frag);
-        modelLayers.appendChild(armorOverlay);
-
-        const bodyImg = queryFirst(defenderArea, ["[class*='bodyImage']", "img[src*='model']"]);
-        if (!bodyImg) return;
+        armoursWrap.appendChild(frag);
 
         const MAP_NAME = "ll-armor-map";
-        const slotAreas = {
-            4: [{ coords: "119,79,99,73,80,96,62,131,54,150,52,167,62,169,79,138,91,118,99,142,95,159,143,161,144,143,148,118,162,141,174,166,187,165,176,129,162,95,140,75" }],
-            6: [{ coords: "118,77,104,67,99,52,104,36,118,26,132,32,136,51,133,69" }],
-            7: [{ coords: "94,162,145,162,157,204,154,239,150,261,156,275,150,301,136,303,131,283,121,209,109,284,105,300,89,299,85,276,87,257,84,236,85,201" }],
-            8: [
-                { coords: "87,300,89,322,86,336,78,349,88,354,99,354,104,340,106,325,105,302" },
-                { coords: "136,304,153,300,151,318,153,330,160,343,153,352,138,353,132,330" }
-            ],
-            9: [
-                { coords: "48,203,55,192,62,195,67,192,61,172,50,169,44,183,40,203" },
-                { coords: "175,171,189,170,196,185,198,200,191,202,184,191,177,196,176,180" }
-            ]
-        };
-
         const map = W.document.createElement("map");
         map.name = MAP_NAME;
         map.className = "ll-armor-map ll-slot-overlay";
 
         for (const slot of [4, 6, 7, 8, 9]) {
             const item = loadout[slot];
-            if (!item || !slotAreas[slot]) continue;
+            if (!item || !ARMOR_SLOT_AREAS[slot]) continue;
 
-            for (const { coords } of slotAreas[slot]) {
+            for (const { coords } of ARMOR_SLOT_AREAS[slot]) {
                 const area = W.document.createElement("area");
                 area.shape = "poly";
                 area.coords = coords;
@@ -965,19 +1053,26 @@
             const hasDefender = !!defenderArea.querySelector("#defender_Primary");
             const hasAttacker = !!defenderArea.querySelector("#attacker_Primary");
             const includeLabel = hasDefender || hasAttacker;
+            const prefix = hasDefender ? "defender" : hasAttacker ? "attacker" : null;
 
             const slotMappings = [
-                { selector: hasDefender ? "#defender_Primary"   : hasAttacker ? "#attacker_Primary"   : "#weapon_main",   slot: 1, label: "Primary" },
-                { selector: hasDefender ? "#defender_Secondary" : hasAttacker ? "#attacker_Secondary" : "#weapon_second", slot: 2, label: "Secondary" },
-                { selector: hasDefender ? "#defender_Melee"     : hasAttacker ? "#attacker_Melee"     : "#weapon_melee",  slot: 3, label: "Melee" },
-                { selector: hasDefender ? "#defender_Temporary" : hasAttacker ? "#attacker_Temporary" : "#weapon_temp",   slot: 5, label: "Temporary" }
-            ];
+                { slot: 1, label: "Primary", fallback: "#weapon_main" },
+                { slot: 2, label: "Secondary", fallback: "#weapon_second" },
+                { slot: 3, label: "Melee", fallback: "#weapon_melee" },
+                { slot: 5, label: "Temporary", fallback: "#weapon_temp" }
+            ].map(({ slot, label, fallback }) => ({
+                selector: prefix ? `#${prefix}_${label}` : fallback,
+                slot,
+                label
+            }));
 
             for (const { selector, slot, label } of slotMappings) {
                 const marker = defenderArea.querySelector(selector);
                 const wrapper = marker?.closest("[class*='weaponWrapper'], [class*='weapon']");
                 if (wrapper && loadout[slot]) {
                     renderSlot(wrapper, loadout[slot], label, includeLabel, slot);
+                } else if (wrapper) {
+                    renderEmptySlot(wrapper, slot);
                 }
             }
 
