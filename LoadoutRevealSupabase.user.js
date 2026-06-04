@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.6
+// @version      3.7.8
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
-// @connect      askelads.grusmedia.no
+// @connect      loadout.grusmedia.no
 // @run-at       document-start
 // @downloadURL  https://raw.githubusercontent.com/Grussniffer/LoadoutSaver/main/LoadoutRevealSupabase.user.js
 // @updateURL    https://raw.githubusercontent.com/Grussniffer/LoadoutSaver/main/LoadoutRevealSupabase.meta.js
@@ -17,17 +17,18 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.7.6";
+    const SCRIPT_VERSION = "3.7.8";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
     const CFG = {
-        apiBaseUrl: "https://askelads.grusmedia.no/loadout-api",
+        apiBaseUrl: "https://loadout.grusmedia.no/api",
         historyLimit: 10,
         cacheMaxAgeMs: 24 * 60 * 60 * 1000,
         latestRevalidateAfterMs: 5 * 60 * 1000,
         historyRevalidateAfterMs: 10 * 60 * 1000,
         tokenRefreshWindowMs: 10 * 60 * 1000,
+        requestTimeoutMs: 15000,
         store: {
             apiKey: "loadout_loader_api_key",
             backendToken: "loadout_loader_backend_token",
@@ -278,8 +279,34 @@
         toast(message, duration);
     }
 
+    function buildApiUrl(path) {
+        const base = CFG.apiBaseUrl.replace(/\/+$/, "");
+        const suffix = String(path || "").replace(/^\/+/, "");
+        return `${base}/${suffix}`;
+    }
+
+    function failedRequest(error = "Request failed") {
+        return { ok: false, status: 0, data: { error } };
+    }
+
+    function requestTimeout() {
+        return failedRequest("Request timed out");
+    }
+
+    function withRequestTimeout(promise) {
+        let timer = null;
+        const timeout = new Promise((resolve) => {
+            timer = W.setTimeout(() => resolve(requestTimeout()), CFG.requestTimeoutMs);
+        });
+
+        return Promise.race([promise, timeout])
+            .finally(() => {
+                if (timer) W.clearTimeout(timer);
+            });
+    }
+
     function apiRequest(method, path, body, { auth = false } = {}) {
-        const url = `${CFG.apiBaseUrl}${path}`;
+        const url = buildApiUrl(path);
         const bridge = W.flutter_inappwebview;
 
         const headers = {
@@ -301,13 +328,13 @@
                 ? bridge.callHandler(handler, url, headers)
                 : bridge.callHandler(handler, url, headers, body ? JSON.stringify(body) : "");
 
-            return call
+            return withRequestTimeout(call
                 .then(r => ({
                     ok: Number(r?.status || 0) >= 200 && Number(r?.status || 0) < 300,
                     status: Number(r?.status || 0),
                     data: parseJson(String(r?.responseText || ""))
                 }))
-                .catch(() => ({ ok: false, status: 0, data: null }));
+                .catch(() => failedRequest()));
         }
 
         if (typeof GM_xmlhttpRequest === "function") {
@@ -316,19 +343,20 @@
                     method,
                     url,
                     headers,
+                    timeout: CFG.requestTimeoutMs,
                     ...(body ? { data: JSON.stringify(body) } : {}),
                     onload: (r) => resolve({
                         ok: r.status >= 200 && r.status < 300,
                         status: r.status,
                         data: parseJson(r.responseText)
                     }),
-                    onerror: () => resolve({ ok: false, status: 0, data: null }),
-                    ontimeout: () => resolve({ ok: false, status: 0, data: null })
+                    onerror: () => resolve(failedRequest()),
+                    ontimeout: () => resolve(requestTimeout())
                 });
             });
         }
 
-        return W.fetch(url, {
+        return withRequestTimeout(W.fetch(url, {
             method,
             headers,
             ...(body ? { body: JSON.stringify(body) } : {})
@@ -338,7 +366,7 @@
                 status: r.status,
                 data: parseJson(await r.text())
             }))
-            .catch(() => ({ ok: false, status: 0, data: null }));
+            .catch(() => failedRequest()));
     }
 
     async function authorizedRequest(method, path, body) {
@@ -542,7 +570,7 @@
             return false;
         }
 
-        const res = await apiRequest("POST", "/api/auth/torn", { apiKey }, { auth: false });
+        const res = await apiRequest("POST", "/auth/torn", { apiKey }, { auth: false });
 
         if (!res.ok || !res.data?.ok || !res.data?.token) {
             STATE.authChecked = true;
@@ -635,10 +663,25 @@
     }
 
     async function fetchLatestFromBackend(targetId) {
-        const res = await authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null);
+        const res = await authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/latest`, null);
         updateAuthStatus();
         if (!res.ok || !res.data?.ok || !res.data?.loadout) return null;
         return res.data.loadout;
+    }
+
+    async function fetchLatestFallbackFromHistory(targetId) {
+        const history = await fetchHistoryFromBackend(targetId, 1);
+        const row = history[0];
+        if (!row?.loadout) return null;
+
+        return {
+            loadout: row.loadout,
+            inserted_at: row.observed_at || row.inserted_at
+        };
+    }
+
+    async function fetchLatestOrHistoryFallback(targetId) {
+        return await fetchLatestFromBackend(targetId) || await fetchLatestFallbackFromHistory(targetId);
     }
 
     async function silentRevalidateLatest(targetId, renderedCacheEntry = null) {
@@ -647,7 +690,7 @@
         STATE.latestRevalidateInFlight.add(id);
 
         try {
-            const fresh = await fetchLatestFromBackend(targetId);
+            const fresh = await fetchLatestOrHistoryFallback(targetId);
             if (!fresh?.loadout) return;
 
             const currentCached = renderedCacheEntry || sessionCacheGetEntry(latestCacheKey(targetId));
@@ -688,15 +731,15 @@
             }
         }
 
-        const fresh = await fetchLatestFromBackend(targetId);
+        const fresh = await fetchLatestOrHistoryFallback(targetId);
         if (fresh?.loadout) {
             sessionCacheSet(cacheKey, fresh);
             renderLoadout(fresh.loadout, fresh.inserted_at, force);
         }
     }
 
-    async function fetchHistoryFromBackend(targetId) {
-        const res = await authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=${CFG.historyLimit}`, null);
+    async function fetchHistoryFromBackend(targetId, limit = CFG.historyLimit) {
+        const res = await authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/history?limit=${encodeURIComponent(limit)}`, null);
         updateAuthStatus();
         if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
         return res.data.history;
@@ -1118,7 +1161,7 @@
             loadout
         };
 
-        const res = await authorizedRequest("POST", "/api/loadouts/report", payload);
+        const res = await authorizedRequest("POST", "/loadouts/report", payload);
         updateAuthStatus();
 
         if (res.ok && res.data?.ok) {
@@ -1552,7 +1595,7 @@
             toast("No defender detected.");
             return null;
         }
-        return authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/latest`, null);
+        return authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/latest`, null);
     }
 
     W.testBackendLatest = testBackendLatest;
@@ -1563,7 +1606,7 @@
             toast("No defender detected.");
             return null;
         }
-        return authorizedRequest("GET", `/api/loadouts/${encodeURIComponent(targetId)}/history?limit=5`, null);
+        return authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/history?limit=5`, null);
     }
 
     W.testBackendHistory = testBackendHistory;
