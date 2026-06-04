@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.8
+// @version      3.7.9
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
@@ -17,12 +17,12 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.7.8";
+    const SCRIPT_VERSION = "3.7.9";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
     const CFG = {
-        apiBaseUrl: "https://loadout.grusmedia.no/api",
+        apiBaseUrl: "https://loadout.grusmedia.no/loader-api",
         historyLimit: 10,
         cacheMaxAgeMs: 24 * 60 * 60 * 1000,
         latestRevalidateAfterMs: 5 * 60 * 1000,
@@ -486,6 +486,17 @@
         }));
     }
 
+    function firstNumeric(...values) {
+        for (const value of values) {
+            if (value == null || value === "") continue;
+            const numberValue = typeof value === "string"
+                ? Number(value.replace("%", "").trim())
+                : Number(value);
+            if (Number.isFinite(numberValue)) return numberValue;
+        }
+        return undefined;
+    }
+
     function normalizeBonuses(bonuses) {
         if (!bonuses) return [];
         const arr = Array.isArray(bonuses)
@@ -495,14 +506,30 @@
                 ...(value || {})
             }));
 
-        return arr.map(b => ({
-            bonus_key: b?.icon || normalizeBonusIconKey({
-                bonus_key: b?.bonus_key || b?.key,
-                name: b?.title || b?.name || b?.label || ""
-            }),
-            name: b?.title || b?.name || b?.label || "",
-            description: b?.desc || b?.description || b?.text || b?.hoverover || ""
-        }));
+        return arr.map(b => {
+            const value = firstNumeric(b?.value, b?.bonus_value, b?.bonusValue, b?.amount);
+            const percent = firstNumeric(b?.percent, b?.percentage, b?.bonus_percent, b?.bonusPercent);
+            const normalized = {
+                bonus_key: b?.icon || normalizeBonusIconKey({
+                    bonus_key: b?.bonus_key || b?.key,
+                    name: b?.title || b?.name || b?.label || ""
+                }),
+                name: b?.title || b?.name || b?.label || "",
+                description: b?.desc || b?.description || b?.text || b?.hoverover || ""
+            };
+
+            if (value !== undefined) {
+                normalized.value = value;
+                normalized.bonus_value = value;
+            }
+            if (percent !== undefined) {
+                normalized.percent = percent;
+                normalized.percentage = percent;
+                normalized.bonus_percent = percent;
+            }
+
+            return normalized;
+        });
     }
 
     function mapGlowClassToRarity(glowClass) {
@@ -577,6 +604,8 @@
             STATE.isAuthorized = false;
             STATE.userInfo = null;
             setBackendToken("");
+            const detail = res.data?.error || res.data?.message || `HTTP ${res.status || 0}`;
+            toast(`Backend auth failed: ${detail}`, 8000);
             return false;
         }
 
