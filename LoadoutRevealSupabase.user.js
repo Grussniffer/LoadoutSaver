@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.10
+// @version      3.7.14
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        unsafeWindow
 // @connect      loadout.grusmedia.no
 // @run-at       document-start
@@ -17,7 +19,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.7.10";
+    const SCRIPT_VERSION = "3.7.14";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -43,10 +45,14 @@
         authChecked: false,
         isAuthorized: false,
         userInfo: null,
+        authErrorMessage: null,
         authPromise: null,
         historyOpen: false,
+        backendWarningsShown: new Set(),
+        backendRequestsInFlight: new Map(),
         latestRevalidateInFlight: new Set(),
-        historyRevalidateInFlight: new Set()
+        historyRevalidateInFlight: new Set(),
+        renderIntegrityTimers: []
     };
 
     function getLocalStorage(key) {
@@ -57,16 +63,54 @@
         try { localStorage.setItem(key, v); } catch {}
     }
 
+    function removeLocalStorage(key) {
+        try { localStorage.removeItem(key); } catch {}
+    }
+
+    function hasUserscriptStorage() {
+        return !IS_PDA && typeof GM_getValue === "function" && typeof GM_setValue === "function";
+    }
+
+    function getStoredValue(key) {
+        if (hasUserscriptStorage()) {
+            try {
+                const value = GM_getValue(key, null);
+                if (value !== null && value !== undefined) return value;
+
+                const legacy = getLocalStorage(key);
+                if (legacy !== null && legacy !== undefined) {
+                    GM_setValue(key, legacy);
+                    removeLocalStorage(key);
+                    return legacy;
+                }
+            } catch {}
+        }
+
+        return getLocalStorage(key);
+    }
+
+    function setStoredValue(key, v) {
+        if (hasUserscriptStorage()) {
+            try {
+                GM_setValue(key, v);
+                removeLocalStorage(key);
+                return;
+            } catch {}
+        }
+
+        setLocalStorage(key, v);
+    }
+
     function getAPIKey() {
-        return IS_PDA ? PDA_KEY : getLocalStorage(CFG.store.apiKey);
+        return IS_PDA ? PDA_KEY : getStoredValue(CFG.store.apiKey);
     }
 
     function getBackendToken() {
-        return getLocalStorage(CFG.store.backendToken);
+        return getStoredValue(CFG.store.backendToken);
     }
 
     function setBackendToken(token) {
-        setLocalStorage(CFG.store.backendToken, token || "");
+        setStoredValue(CFG.store.backendToken, token || "");
     }
 
     function parseJson(text) {
@@ -195,6 +239,10 @@
         return `askelads:history:${defenderId}:${limit}`;
     }
 
+    function lastReportCacheKey(defenderId) {
+        return `askelads:last-report:${defenderId}`;
+    }
+
     function clearDefenderSessionCache(defenderId) {
         clearSessionCachePrefix(`askelads:latest:${defenderId}`);
         clearSessionCachePrefix(`askelads:history:${defenderId}:`);
@@ -204,6 +252,7 @@
         STATE.authChecked = false;
         STATE.isAuthorized = false;
         STATE.userInfo = null;
+        STATE.authErrorMessage = null;
         STATE.authPromise = null;
         setBackendToken("");
     }
@@ -211,6 +260,7 @@
     function resetAttackState() {
         STATE.uploaded = false;
         STATE.loadoutRendered = false;
+        clearRenderIntegrityTimers();
         cleanupScriptOverlays();
     }
 
@@ -218,6 +268,11 @@
         W.document
             .querySelectorAll(".ll-slot-overlay, .ll-armor-overlay, .ll-armor-layer, .ll-armor-map")
             .forEach(el => el.remove());
+    }
+
+    function clearRenderIntegrityTimers() {
+        STATE.renderIntegrityTimers.forEach(timer => W.clearTimeout(timer));
+        STATE.renderIntegrityTimers = [];
     }
 
     function parseJwtPayload(token) {
@@ -275,8 +330,67 @@
     }
 
     function toastInfo(message, duration = 2500) {
-        if (getLocalStorage(CFG.store.quietToasts) === "1") return;
+        if (getStoredValue(CFG.store.quietToasts) === "1") return;
         toast(message, duration);
+    }
+
+    const API_ERRORS = {
+        INVALID_API_KEY: "Invalid Torn public API key.",
+        INVALID_TORN_API_KEY: "Invalid Torn public API key.",
+        API_KEY_REQUIRED: "Please add your Torn public API key.",
+        NOT_AUTHORIZED: "You are not authorized to use this backend.",
+        UNAUTHORIZED: "Your backend session expired. Please authenticate again.",
+        FACTION_DENIED: "Your faction is not allowed to use this backend.",
+        BLACKLISTED: "You have been blocked from using this backend.",
+        SCRIPT_DEPRECATED: "This script version is deprecated. Please update.",
+        SCRIPT_EXPIRED: "This script version has expired. Please update.",
+        INVALID_LOADOUT: "The loadout data was not accepted by the backend.",
+        UNKNOWN_ITEM: "The backend did not recognize one of the uploaded items.",
+        1: "Invalid Torn public API key.",
+        4: "Please add your Torn public API key.",
+        5: "The loadout data was not accepted by the backend.",
+        6: "This script version has expired. Please update.",
+        8: "You have been blocked from using this backend.",
+        9: "The backend did not recognize one of the uploaded items."
+    };
+
+    function apiErrorMessage(data, fallback = "Backend request failed.") {
+        const err = data?.error;
+        const code = err?.code ?? data?.code ?? err;
+        const message = err?.message ?? data?.message;
+
+        return API_ERRORS[code] || message || (typeof err === "string" ? err : "") || fallback;
+    }
+
+    function handleBackendWarning(data) {
+        const warning = data?._warning || data?.warning;
+        const code = warning?.code;
+        if (!code || STATE.backendWarningsShown.has(code)) return;
+
+        STATE.backendWarningsShown.add(code);
+
+        if (code === "SCRIPT_DEPRECATED" || code === "SCRIPT_EXPIRED") {
+            const expiresAt = warning.expiresAt || warning.expires_at;
+            const msLeft = expiresAt ? new Date(expiresAt).getTime() - Date.now() : NaN;
+            const suffix = Number.isFinite(msLeft) && msLeft > 0
+                ? ` It may stop working in ${relativeTime(msLeft).replace(" ago", "")}.`
+                : "";
+            toast(`${API_ERRORS[code]}${suffix}`, 12000);
+            return;
+        }
+
+        toast(warning.message || API_ERRORS[code] || `Backend warning: ${code}`, 10000);
+    }
+
+    function wrapApiResponse(status, text) {
+        const data = parseJson(text);
+        handleBackendWarning(data);
+
+        return {
+            ok: status >= 200 && status < 300,
+            status,
+            data
+        };
     }
 
     function buildApiUrl(path) {
@@ -303,6 +417,17 @@
             .finally(() => {
                 if (timer) W.clearTimeout(timer);
             });
+    }
+
+    function fetchWithTimeout(url, options) {
+        const Abort = W.AbortController || (typeof AbortController !== "undefined" ? AbortController : null);
+        if (!Abort) return withRequestTimeout(W.fetch(url, options));
+
+        const controller = new Abort();
+        const timer = W.setTimeout(() => controller.abort(), CFG.requestTimeoutMs);
+
+        return W.fetch(url, { ...options, signal: controller.signal })
+            .finally(() => W.clearTimeout(timer));
     }
 
     function apiRequest(method, path, body, { auth = false } = {}) {
@@ -332,11 +457,7 @@
                 : bridge.callHandler(handler, url, headers, body ? JSON.stringify(body) : "");
 
             return withRequestTimeout(call
-                .then(r => ({
-                    ok: Number(r?.status || 0) >= 200 && Number(r?.status || 0) < 300,
-                    status: Number(r?.status || 0),
-                    data: parseJson(String(r?.responseText || ""))
-                }))
+                .then(r => wrapApiResponse(Number(r?.status || 0), String(r?.responseText || "")))
                 .catch(() => failedRequest()));
         }
 
@@ -348,28 +469,20 @@
                     headers,
                     timeout: CFG.requestTimeoutMs,
                     ...(body ? { data: JSON.stringify(body) } : {}),
-                    onload: (r) => resolve({
-                        ok: r.status >= 200 && r.status < 300,
-                        status: r.status,
-                        data: parseJson(r.responseText)
-                    }),
+                    onload: (r) => resolve(wrapApiResponse(r.status, r.responseText)),
                     onerror: () => resolve(failedRequest()),
                     ontimeout: () => resolve(requestTimeout())
                 });
             });
         }
 
-        return withRequestTimeout(W.fetch(url, {
+        return fetchWithTimeout(url, {
             method,
             headers,
             ...(body ? { body: JSON.stringify(body) } : {})
         })
-            .then(async (r) => ({
-                ok: r.ok,
-                status: r.status,
-                data: parseJson(await r.text())
-            }))
-            .catch(() => failedRequest()));
+            .then(async (r) => wrapApiResponse(r.status, await r.text()))
+            .catch(() => failedRequest());
     }
 
     async function authorizedRequest(method, path, body) {
@@ -597,6 +710,7 @@
             STATE.authChecked = true;
             STATE.isAuthorized = false;
             STATE.userInfo = null;
+            STATE.authErrorMessage = null;
             return false;
         }
 
@@ -607,13 +721,15 @@
             STATE.isAuthorized = false;
             STATE.userInfo = null;
             setBackendToken("");
-            const detail = res.data?.error || res.data?.message || `HTTP ${res.status || 0}`;
+            const detail = apiErrorMessage(res.data, `HTTP ${res.status || 0}`);
+            STATE.authErrorMessage = detail;
             toast(`Backend auth failed: ${detail}`, 8000);
             return false;
         }
 
         setBackendToken(res.data.token);
         STATE.userInfo = res.data.player || null;
+        STATE.authErrorMessage = null;
         STATE.authChecked = true;
         STATE.isAuthorized = true;
         return true;
@@ -678,8 +794,21 @@
         statusEl.style.color = "#9fd09c";
     }
 
+    function urlTargetId() {
+        try {
+            const id = new URL(W.location.href).searchParams.get("user2ID");
+            return id && /^\d+$/.test(id) ? Number(id) : null;
+        } catch {
+            return null;
+        }
+    }
+
+    function sameTargetId(a, b) {
+        return a != null && b != null && String(a) === String(b);
+    }
+
     function currentTargetId() {
-        return extractUserId(STATE.attackData?.defenderUser);
+        return extractUserId(STATE.attackData?.defenderUser) || urlTargetId();
     }
 
     function currentTargetName() {
@@ -694,16 +823,84 @@
         }
     }
 
+    function stableStringify(value) {
+        if (value === null || typeof value !== "object") return JSON.stringify(value);
+        if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+
+        return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+    }
+
+    function loadoutFingerprint(loadout) {
+        try {
+            return stableStringify(loadout);
+        } catch {
+            return JSON.stringify(loadout);
+        }
+    }
+
+    function getKnownReportState(defenderId, loadout) {
+        const fingerprint = loadoutFingerprint(loadout);
+        const lastReport = sessionCacheGet(lastReportCacheKey(defenderId), CFG.cacheMaxAgeMs);
+        const latest = sessionCacheGet(latestCacheKey(defenderId), CFG.cacheMaxAgeMs);
+        const latestFingerprint = latest?.loadout ? loadoutFingerprint(latest.loadout) : null;
+
+        return {
+            fingerprint,
+            isKnownDuplicate: lastReport?.fingerprint === fingerprint || latestFingerprint === fingerprint
+        };
+    }
+
+    function rememberReportedLoadout(defenderId, fingerprint) {
+        sessionCacheSet(lastReportCacheKey(defenderId), { fingerprint });
+    }
+
+    function dedupeBackendRequest(key, fn) {
+        if (STATE.backendRequestsInFlight.has(key)) {
+            return STATE.backendRequestsInFlight.get(key);
+        }
+
+        const request = Promise.resolve()
+            .then(fn)
+            .finally(() => STATE.backendRequestsInFlight.delete(key));
+
+        STATE.backendRequestsInFlight.set(key, request);
+        return request;
+    }
+
+    function getCachedHistoryEntry(targetId, limit) {
+        const entry = sessionCacheGetEntry(historyCacheKey(targetId, limit));
+        if (entry && (Date.now() - entry.cachedAt) <= CFG.cacheMaxAgeMs && Array.isArray(entry.data)) {
+            return entry;
+        }
+
+        return null;
+    }
+
+    function getCachedHistory(targetId, limit) {
+        return getCachedHistoryEntry(targetId, limit)?.data || null;
+    }
+
+    function getNewestCachedHistoryRow(targetId) {
+        const single = getCachedHistory(targetId, 1);
+        if (single?.[0]?.loadout) return single[0];
+
+        const full = getCachedHistory(targetId, CFG.historyLimit);
+        if (full?.[0]?.loadout) return full[0];
+
+        return null;
+    }
+
     async function fetchLatestFromBackend(targetId) {
-        const res = await authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/latest`, null);
-        updateAuthStatus();
-        if (!res.ok || !res.data?.ok || !res.data?.loadout) return null;
-        return res.data.loadout;
+        return dedupeBackendRequest(`latest:${targetId}`, async () => {
+            const res = await authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/latest`, null);
+            updateAuthStatus();
+            if (!res.ok || !res.data?.ok || !res.data?.loadout) return null;
+            return res.data.loadout;
+        });
     }
 
     async function fetchLatestFallbackFromHistory(targetId) {
-        const history = await fetchHistoryFromBackend(targetId, 1);
-        const row = history[0];
+        const row = getNewestCachedHistoryRow(targetId) || (await fetchHistoryForTarget(targetId, 1))[0];
         if (!row?.loadout) return null;
 
         return {
@@ -731,7 +928,7 @@
             sessionCacheSet(latestCacheKey(targetId), fresh);
 
             if (!previousData || !deepEqualJson(previousData, fresh)) {
-                if (currentTargetId() === Number(id) || String(currentTargetId()) === id) {
+                if (sameTargetId(currentTargetId(), id)) {
                     STATE.loadoutRendered = false;
                     renderLoadout(fresh.loadout, fresh.inserted_at, true);
                 }
@@ -771,21 +968,45 @@
     }
 
     async function fetchHistoryFromBackend(targetId, limit = CFG.historyLimit) {
-        const res = await authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/history?limit=${encodeURIComponent(limit)}`, null);
-        updateAuthStatus();
-        if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
-        return res.data.history;
+        return dedupeBackendRequest(`history:${targetId}:${limit}`, async () => {
+            const res = await authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/history?limit=${encodeURIComponent(limit)}`, null);
+            updateAuthStatus();
+            if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
+            return res.data.history;
+        });
     }
 
-    async function silentRevalidateHistory(targetId) {
-        const key = `${targetId}:${CFG.historyLimit}`;
+    async function fetchHistoryForTarget(targetId, limit = CFG.historyLimit, { forceRefresh = false } = {}) {
+        const cacheKey = historyCacheKey(targetId, limit);
+
+        if (!forceRefresh) {
+            const entry = getCachedHistoryEntry(targetId, limit);
+            if (entry) {
+                if ((Date.now() - entry.cachedAt) >= CFG.historyRevalidateAfterMs) {
+                    void silentRevalidateHistory(targetId, limit);
+                }
+                return entry.data;
+            }
+        }
+
+        const fresh = await fetchHistoryFromBackend(targetId, limit);
+        if (Array.isArray(fresh)) {
+            sessionCacheSet(cacheKey, fresh);
+            return fresh;
+        }
+
+        return [];
+    }
+
+    async function silentRevalidateHistory(targetId, limit = CFG.historyLimit) {
+        const key = `${targetId}:${limit}`;
         if (STATE.historyRevalidateInFlight.has(key)) return;
         STATE.historyRevalidateInFlight.add(key);
 
         try {
-            const fresh = await fetchHistoryFromBackend(targetId);
+            const fresh = await fetchHistoryFromBackend(targetId, limit);
             if (!Array.isArray(fresh)) return;
-            sessionCacheSet(historyCacheKey(targetId, CFG.historyLimit), fresh);
+            sessionCacheSet(historyCacheKey(targetId, limit), fresh);
         } finally {
             STATE.historyRevalidateInFlight.delete(key);
         }
@@ -802,25 +1023,7 @@
             return [];
         }
 
-        const cacheKey = historyCacheKey(targetId, CFG.historyLimit);
-
-        if (!forceRefresh) {
-            const entry = sessionCacheGetEntry(cacheKey);
-            if (entry && (Date.now() - entry.cachedAt) <= CFG.cacheMaxAgeMs && Array.isArray(entry.data)) {
-                if ((Date.now() - entry.cachedAt) >= CFG.historyRevalidateAfterMs) {
-                    void silentRevalidateHistory(targetId);
-                }
-                return entry.data;
-            }
-        }
-
-        const fresh = await fetchHistoryFromBackend(targetId);
-        if (Array.isArray(fresh)) {
-            sessionCacheSet(cacheKey, fresh);
-            return fresh;
-        }
-
-        return [];
+        return fetchHistoryForTarget(targetId, CFG.historyLimit, { forceRefresh });
     }
 
     function queryFirst(root, selectors) {
@@ -1116,8 +1319,39 @@
         bodyImg.setAttribute("usemap", `#${MAP_NAME}`);
     }
 
-    function renderLoadout(loadout, inserted, force = false) {
-        if (!loadout || (STATE.loadoutRendered && !force) || STATE.attackData?.fightID) return;
+    function expectedArmorOverlayCount(loadout) {
+        return [4, 6, 7, 8, 9].filter(slot => !!loadout?.[slot]).length;
+    }
+
+    function hasRenderedArmorOverlays(loadout) {
+        const expected = expectedArmorOverlayCount(loadout);
+        if (!expected) return true;
+
+        const defenderArea = getDefenderArea();
+        if (!defenderArea) return true;
+
+        return defenderArea.querySelectorAll(".ll-armor-layer").length >= expected;
+    }
+
+    function scheduleRenderIntegrityChecks(loadout, inserted) {
+        clearRenderIntegrityTimers();
+
+        for (const delay of [250, 750, 1500, 3000]) {
+            const timer = W.setTimeout(() => {
+                if (!STATE.loadoutRendered) return;
+                if (hasNativeDefenderLoadout(STATE.attackData?.defenderItems)) return;
+                if (hasRenderedArmorOverlays(loadout)) return;
+
+                STATE.loadoutRendered = false;
+                renderLoadout(loadout, inserted, true, false);
+            }, delay);
+
+            STATE.renderIntegrityTimers.push(timer);
+        }
+    }
+
+    function renderLoadout(loadout, inserted, force = false, scheduleIntegrity = true) {
+        if (!loadout || (STATE.loadoutRendered && !force) || hasNativeDefenderLoadout(STATE.attackData?.defenderItems)) return;
 
         waitForElement("#defender_Primary, #defender_Secondary, #defender_Melee, #defender_Temporary, #attacker_Primary, [class*='playerArea']", () => {
             const defenderArea = getDefenderArea();
@@ -1171,6 +1405,7 @@
             }
 
             STATE.loadoutRendered = true;
+            if (scheduleIntegrity) scheduleRenderIntegrityChecks(loadout, inserted);
         });
     }
 
@@ -1184,6 +1419,7 @@
 
         if (!attackerId || !defenderId || !loadout) return;
 
+        const reportState = getKnownReportState(defenderId, loadout);
         const payload = {
             defender_id: defenderId,
             attacker_id: attackerId,
@@ -1201,9 +1437,19 @@
             if (res.data.latest) {
                 sessionCacheSet(latestCacheKey(defenderId), res.data.latest);
             }
-            toastInfo("Loadout saved to the war chest.");
+
+            rememberReportedLoadout(defenderId, reportState.fingerprint);
+
+            const backendSaysDuplicate = res.data?.duplicate === true
+                || res.data?.unchanged === true
+                || res.data?.created === false
+                || res.data?.inserted === false;
+
+            if (!reportState.isKnownDuplicate && !backendSaysDuplicate) {
+                toastInfo("Loadout saved to the war chest.");
+            }
         } else {
-            toast(res.data?.error || "Failed to save defender loadout.");
+            toast(apiErrorMessage(res.data, "Failed to save defender loadout."));
         }
     }
 
@@ -1387,6 +1633,10 @@
         W.open("https://www.torn.com/preferences.php#tab=api", "_blank", "noopener,noreferrer");
     }
 
+    function maskApiKey(key) {
+        return key ? `${String(key).slice(0, 6)}**********` : "";
+    }
+
     function createPanel() {
         const host = W.document.createElement("div");
         host.id = "loadout-panel";
@@ -1452,12 +1702,13 @@
         }
 
         const savedKey = getAPIKey();
+        const maskedKey = maskApiKey(savedKey);
 
         const pdaKeyControls = IS_PDA
             ? `<div style="margin-bottom:8px;color:#9fd09c;font-size:11px;">Torn-PDA detected. API key is loaded automatically.</div>
                ${getApiKeyHelpHtml()}`
             : `<div style="margin-bottom:5px;color:#d7b46a;font-size:11px;font-weight:700;letter-spacing:.25px;text-transform:uppercase;">Torn Public API Key</div>
-               <input id="loadout-key-input" type="password" placeholder="Enter your Torn public API key" value="${escapeHtml(savedKey)}"
+               <input id="loadout-key-input" type="password" placeholder="Enter your Torn public API key" value="${escapeHtml(maskedKey)}" data-saved-mask="${escapeHtml(maskedKey)}"
                  style="width:100%;padding:8px 10px;border-radius:10px;border:1px solid rgba(191,145,63,0.18);background:rgba(7,7,7,0.45);color:#f4e7c2;margin-bottom:9px;box-sizing:border-box;outline:none;">
 
                <div style="display:flex;gap:6px;flex-wrap:wrap;">
@@ -1489,7 +1740,7 @@
             ${pdaKeyControls}
 
             <label style="display:flex;align-items:center;gap:7px;margin-top:10px;cursor:pointer;color:#d8ceb9;font-size:12px;">
-                <input id="loadout-quiet-chk" type="checkbox" ${getLocalStorage(CFG.store.quietToasts) === "1" ? "checked" : ""}>
+                <input id="loadout-quiet-chk" type="checkbox" ${getStoredValue(CFG.store.quietToasts) === "1" ? "checked" : ""}>
                 Quiet mode
             </label>
 
@@ -1542,7 +1793,7 @@
         };
 
         panel.querySelector("#loadout-quiet-chk").onchange = (e) => {
-            setLocalStorage(CFG.store.quietToasts, e.target.checked ? "1" : "0");
+            setStoredValue(CFG.store.quietToasts, e.target.checked ? "1" : "0");
         };
 
         panel.querySelector("#loadout-show-history-btn").onclick = () => {
@@ -1556,30 +1807,41 @@
         if (!IS_PDA) {
             const input = panel.querySelector("#loadout-key-input");
 
+            input.onfocus = () => {
+                const savedMask = input.dataset.savedMask || "";
+                if (input.value === savedMask) input.value = "";
+            };
+
             panel.querySelector("#loadout-save-btn").onclick = async () => {
-                const key = input.value.trim();
+                const rawKey = input.value.trim();
+                const savedMask = input.dataset.savedMask || "";
+                const key = rawKey === savedMask ? getAPIKey() : rawKey;
                 if (!key) {
                     toast("Please enter a key.");
                     return;
                 }
 
-                setLocalStorage(CFG.store.apiKey, key);
+                setStoredValue(CFG.store.apiKey, key);
                 resetAuthorizationState();
 
                 const ok = await ensureAuthorized(true);
                 updateAuthStatus();
 
                 if (ok) {
+                    const nextMask = maskApiKey(key);
+                    input.value = nextMask;
+                    input.dataset.savedMask = nextMask;
                     toastInfo("Key saved. Welcome back to the war room.");
                     fetchAndRenderLoadout(true, true);
                 } else {
-                    toast("Failed to authenticate with backend.");
+                    toast(STATE.authErrorMessage || "Failed to authenticate with backend.");
                 }
             };
 
             panel.querySelector("#loadout-clear-btn").onclick = () => {
                 input.value = "";
-                setLocalStorage(CFG.store.apiKey, "");
+                input.dataset.savedMask = "";
+                setStoredValue(CFG.store.apiKey, "");
                 resetAuthorizationState();
                 updateAuthStatus();
                 toastInfo("API key cleared.");
@@ -1643,12 +1905,16 @@
 
     W.testBackendHistory = testBackendHistory;
 
+    function slotHasItemId(slot) {
+        const raw = slot?.item?.[0] || slot?.item || slot?.weapon || slot;
+        return !!extractItemId(raw);
+    }
+
     function hasNativeDefenderLoadout(defenderItems) {
         if (!defenderItems || typeof defenderItems !== "object") return false;
-        return Object.values(defenderItems).some(slot => {
-            const raw = slot?.item?.[0] || slot?.item || slot?.weapon || slot;
-            return !!extractItemId(raw);
-        });
+
+        const nativeMarker = defenderItems?.["999"] || defenderItems?.[999];
+        return slotHasItemId(nativeMarker);
     }
 
     function processResponse(data) {
@@ -1660,6 +1926,7 @@
         const oldDefenderId = extractUserId(STATE.attackData?.defenderUser);
         const hadFightID = !!STATE.attackData?.fightID;
         const isFirstData = !STATE.attackData;
+        const hasNativeLoadout = hasNativeDefenderLoadout(db?.defenderItems);
 
         if (newDefenderId && oldDefenderId && newDefenderId !== oldDefenderId) {
             resetAttackState();
@@ -1668,14 +1935,14 @@
         STATE.attackData = db;
         W.attackDataDebug = db;
 
-        if (!hadFightID && db.fightID) {
+        if (!hadFightID && db.fightID && hasNativeLoadout) {
             cleanupScriptOverlays();
         }
 
-        if (hasNativeDefenderLoadout(db?.defenderItems) && !STATE.uploaded) {
+        if (hasNativeLoadout && !STATE.uploaded) {
             STATE.uploaded = true;
             whenVisible(() => reportLoadout(db));
-        } else if (isFirstData) {
+        } else if (isFirstData && !STATE.loadoutRendered) {
             fetchAndRenderLoadout(true, false);
         }
     }
@@ -1701,14 +1968,22 @@
         };
     }
 
-    function initPanel() {
+    function initPanel(fallback = false) {
         if (W.document.getElementById("loadout-panel")) return true;
 
         const labelsContainer = W.document.querySelector("[class*='labelsContainer']");
-        if (!labelsContainer) return false;
+        if (!labelsContainer && !fallback) return false;
+        if (!labelsContainer && !W.document.body) return false;
 
         const { host, panel, toastHost } = createPanel();
-        labelsContainer.insertBefore(host, labelsContainer.firstChild);
+
+        if (labelsContainer) {
+            labelsContainer.insertBefore(host, labelsContainer.firstChild);
+        } else {
+            host.style.cssText += ";position:fixed;top:10px;right:10px;z-index:2147483646;";
+            W.document.body.appendChild(host);
+        }
+
         W.document.body.appendChild(toastHost);
 
         const apiKey = getAPIKey();
@@ -1716,7 +1991,7 @@
             panel.style.display = "block";
             toast("Enter your Public API key to join the war room.");
         } else {
-            ensureAuthorized(false).then(updateAuthStatus);
+            fetchAndRenderLoadout(true, false);
         }
 
         updateAuthStatus();
@@ -1724,9 +1999,11 @@
     }
 
     const startPanelInit = () => {
-        if (!initPanel()) {
-            waitForElement("[class*='players___eKiHL'], [class*='labelsContainer']", () => initPanel());
-        }
+        if (initPanel()) return;
+        waitForElement("[class*='players___eKiHL'], [class*='labelsContainer']", () => initPanel());
+        waitForElement("#defender_Primary, #defender_Secondary, #defender_Melee, [class*='playerArea']", () => {
+            if (!W.document.getElementById("loadout-panel")) initPanel(true);
+        });
     };
 
     if (W.document.readyState === "loading") {
