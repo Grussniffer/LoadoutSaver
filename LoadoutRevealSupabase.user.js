@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.14
+// @version      3.7.15
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        unsafeWindow
 // @connect      loadout.grusmedia.no
 // @run-at       document-start
@@ -19,7 +20,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.7.14";
+    const SCRIPT_VERSION = "3.7.15";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -31,6 +32,9 @@
         historyRevalidateAfterMs: 10 * 60 * 1000,
         tokenRefreshWindowMs: 10 * 60 * 1000,
         requestTimeoutMs: 15000,
+        startupFallbackMs: 1500,
+        idleWorkTimeoutMs: 750,
+        sharedLatestCacheLimit: 200,
         store: {
             apiKey: "loadout_loader_api_key",
             backendToken: "loadout_loader_backend_token",
@@ -50,9 +54,11 @@
         historyOpen: false,
         backendWarningsShown: new Set(),
         backendRequestsInFlight: new Map(),
+        automaticLoadoutTasks: new Map(),
         latestRevalidateInFlight: new Set(),
         historyRevalidateInFlight: new Set(),
-        renderIntegrityTimers: []
+        renderIntegrityTimers: [],
+        startupFallbackTimer: null
     };
 
     function getLocalStorage(key) {
@@ -161,6 +167,49 @@
             : "just now";
     }
 
+    const elementWaiters = new Set();
+    let elementWaitObserver = null;
+    let elementWaitFlushPending = false;
+
+    function stopElementWaitObserverIfIdle() {
+        if (elementWaiters.size || !elementWaitObserver) return;
+        elementWaitObserver.disconnect();
+        elementWaitObserver = null;
+    }
+
+    function flushElementWaiters() {
+        elementWaitFlushPending = false;
+
+        for (const waiter of [...elementWaiters]) {
+            const el = W.document.querySelector(waiter.selector);
+            if (!el) continue;
+
+            elementWaiters.delete(waiter);
+            W.clearTimeout(waiter.timer);
+            waiter.callback(el);
+        }
+
+        stopElementWaitObserverIfIdle();
+    }
+
+    function scheduleElementWaitFlush() {
+        if (elementWaitFlushPending) return;
+        elementWaitFlushPending = true;
+
+        if (typeof W.requestAnimationFrame === "function") {
+            W.requestAnimationFrame(flushElementWaiters);
+        } else {
+            W.setTimeout(flushElementWaiters, 16);
+        }
+    }
+
+    function ensureElementWaitObserver() {
+        if (elementWaitObserver || !W.document.documentElement) return;
+
+        elementWaitObserver = new MutationObserver(scheduleElementWaitFlush);
+        elementWaitObserver.observe(W.document.documentElement, { childList: true, subtree: true });
+    }
+
     function waitForElement(selector, callback, timeout = 15000) {
         const found = W.document.querySelector(selector);
         if (found) {
@@ -168,17 +217,26 @@
             return;
         }
 
-        const obs = new MutationObserver(() => {
-            const el = W.document.querySelector(selector);
-            if (el) {
-                obs.disconnect();
-                W.clearTimeout(timer);
-                callback(el);
-            }
-        });
+        const waiter = { selector, callback, timer: null };
+        waiter.timer = W.setTimeout(() => {
+            elementWaiters.delete(waiter);
+            stopElementWaitObserverIfIdle();
+        }, timeout);
 
-        obs.observe(W.document.documentElement, { childList: true, subtree: true });
-        const timer = W.setTimeout(() => obs.disconnect(), timeout);
+        elementWaiters.add(waiter);
+        ensureElementWaitObserver();
+        scheduleElementWaitFlush();
+    }
+
+    function waitForIdle(timeout = CFG.idleWorkTimeoutMs) {
+        return new Promise((resolve) => {
+            if (typeof W.requestIdleCallback === "function") {
+                W.requestIdleCallback(() => resolve(), { timeout });
+                return;
+            }
+
+            W.setTimeout(resolve, 32);
+        });
     }
 
     function sessionCacheGetEntry(key) {
@@ -211,13 +269,17 @@
         return entry.data;
     }
 
-    function sessionCacheSet(key, data) {
+    function sessionCacheSetEntry(key, entry) {
         try {
-            sessionStorage.setItem(key, JSON.stringify({
-                cachedAt: Date.now(),
-                data
-            }));
+            sessionStorage.setItem(key, JSON.stringify(entry));
         } catch {}
+    }
+
+    function sessionCacheSet(key, data) {
+        sessionCacheSetEntry(key, {
+            cachedAt: Date.now(),
+            data
+        });
     }
 
     function clearSessionCachePrefix(prefix) {
@@ -235,6 +297,126 @@
         return `askelads:latest:${defenderId}`;
     }
 
+    const SHARED_LATEST_CACHE_INDEX_KEY = "loadout_loader_latest_cache_index_v1";
+    const SHARED_LATEST_CACHE_PREFIX = "loadout_loader_latest_cache_v1:";
+
+    function sharedLatestStorageKey(defenderId) {
+        return `${SHARED_LATEST_CACHE_PREFIX}${defenderId}`;
+    }
+
+    function readSharedCacheValue(key) {
+        if (hasUserscriptStorage()) {
+            try {
+                const value = GM_getValue(key, null);
+                return typeof value === "string" ? parseJson(value) : value;
+            } catch {}
+        }
+
+        const raw = getLocalStorage(key);
+        return raw ? parseJson(raw) : null;
+    }
+
+    function writeSharedCacheValue(key, value) {
+        if (hasUserscriptStorage()) {
+            try {
+                GM_setValue(key, value);
+                removeLocalStorage(key);
+                return;
+            } catch {}
+        }
+
+        setLocalStorage(key, JSON.stringify(value));
+    }
+
+    function deleteSharedCacheValue(key) {
+        if (hasUserscriptStorage()) {
+            try {
+                if (typeof GM_deleteValue === "function") {
+                    GM_deleteValue(key);
+                } else {
+                    GM_setValue(key, null);
+                }
+            } catch {}
+        }
+
+        removeLocalStorage(key);
+    }
+
+    function readSharedLatestIndex() {
+        const value = readSharedCacheValue(SHARED_LATEST_CACHE_INDEX_KEY);
+        return Array.isArray(value) ? value : [];
+    }
+
+    function writeSharedLatestIndex(entries) {
+        writeSharedCacheValue(SHARED_LATEST_CACHE_INDEX_KEY, entries);
+    }
+
+    function clearSharedLatestCache(defenderId) {
+        const id = String(defenderId);
+        deleteSharedCacheValue(sharedLatestStorageKey(id));
+
+        const index = readSharedLatestIndex();
+        const next = index.filter(entry => String(entry?.id) !== id);
+        if (next.length !== index.length) writeSharedLatestIndex(next);
+    }
+
+    function getSharedLatestCacheEntry(defenderId) {
+        const entry = readSharedCacheValue(sharedLatestStorageKey(defenderId));
+        const valid = entry
+            && typeof entry === "object"
+            && Number.isFinite(Number(entry.cachedAt))
+            && entry.data?.loadout;
+
+        if (!valid || Date.now() - Number(entry.cachedAt) > CFG.cacheMaxAgeMs) {
+            if (entry) clearSharedLatestCache(defenderId);
+            return null;
+        }
+
+        return entry;
+    }
+
+    function setSharedLatestCacheEntry(defenderId, entry) {
+        const id = String(defenderId);
+        writeSharedCacheValue(sharedLatestStorageKey(id), entry);
+
+        const next = [
+            { id, cachedAt: entry.cachedAt },
+            ...readSharedLatestIndex().filter(item => String(item?.id) !== id)
+        ];
+        const removed = next.slice(CFG.sharedLatestCacheLimit);
+
+        for (const item of removed) {
+            if (item?.id != null) deleteSharedCacheValue(sharedLatestStorageKey(item.id));
+        }
+
+        writeSharedLatestIndex(next.slice(0, CFG.sharedLatestCacheLimit));
+    }
+
+    function getLatestCacheEntry(defenderId) {
+        const key = latestCacheKey(defenderId);
+        const sessionEntry = sessionCacheGetEntry(key);
+        if (sessionEntry && Date.now() - sessionEntry.cachedAt <= CFG.cacheMaxAgeMs && sessionEntry.data?.loadout) {
+            return sessionEntry;
+        }
+
+        const sharedEntry = getSharedLatestCacheEntry(defenderId);
+        if (!sharedEntry) return null;
+
+        sessionCacheSetEntry(key, sharedEntry);
+        return sharedEntry;
+    }
+
+    function cacheLatestLoadout(defenderId, data) {
+        const entry = {
+            cachedAt: Date.now(),
+            data
+        };
+
+        sessionCacheSetEntry(latestCacheKey(defenderId), entry);
+        setSharedLatestCacheEntry(defenderId, entry);
+        return entry;
+    }
+
     function historyCacheKey(defenderId, limit) {
         return `askelads:history:${defenderId}:${limit}`;
     }
@@ -246,6 +428,7 @@
     function clearDefenderSessionCache(defenderId) {
         clearSessionCachePrefix(`askelads:latest:${defenderId}`);
         clearSessionCachePrefix(`askelads:history:${defenderId}:`);
+        clearSharedLatestCache(defenderId);
     }
 
     function resetAuthorizationState() {
@@ -841,7 +1024,7 @@
     function getKnownReportState(defenderId, loadout) {
         const fingerprint = loadoutFingerprint(loadout);
         const lastReport = sessionCacheGet(lastReportCacheKey(defenderId), CFG.cacheMaxAgeMs);
-        const latest = sessionCacheGet(latestCacheKey(defenderId), CFG.cacheMaxAgeMs);
+        const latest = getLatestCacheEntry(defenderId)?.data || null;
         const latestFingerprint = latest?.loadout ? loadoutFingerprint(latest.loadout) : null;
 
         return {
@@ -922,10 +1105,10 @@
             const fresh = await fetchLatestOrHistoryFallback(targetId);
             if (!fresh?.loadout) return;
 
-            const currentCached = renderedCacheEntry || sessionCacheGetEntry(latestCacheKey(targetId));
+            const currentCached = renderedCacheEntry || getLatestCacheEntry(targetId);
             const previousData = currentCached?.data || null;
 
-            sessionCacheSet(latestCacheKey(targetId), fresh);
+            cacheLatestLoadout(targetId, fresh);
 
             if (!previousData || !deepEqualJson(previousData, fresh)) {
                 if (sameTargetId(currentTargetId(), id)) {
@@ -939,19 +1122,19 @@
     }
 
     async function fetchAndRenderLoadout(force = false, forceRefresh = false) {
+        const targetId = currentTargetId();
+        if (!targetId) return;
+
         const authorized = await ensureAuthorized(false);
         updateAuthStatus();
         if (!authorized) return;
 
-        const targetId = currentTargetId();
-        if (!targetId) return;
-
-        const cacheKey = latestCacheKey(targetId);
-
         if (!forceRefresh) {
-            const entry = sessionCacheGetEntry(cacheKey);
+            const entry = getLatestCacheEntry(targetId);
             if (entry && (Date.now() - entry.cachedAt) <= CFG.cacheMaxAgeMs && entry.data?.loadout) {
-                renderLoadout(entry.data.loadout, entry.data.inserted_at, force);
+                if (sameTargetId(currentTargetId(), targetId)) {
+                    renderLoadout(entry.data.loadout, entry.data.inserted_at, force);
+                }
 
                 if ((Date.now() - entry.cachedAt) >= CFG.latestRevalidateAfterMs) {
                     void silentRevalidateLatest(targetId, entry);
@@ -962,9 +1145,32 @@
 
         const fresh = await fetchLatestOrHistoryFallback(targetId);
         if (fresh?.loadout) {
-            sessionCacheSet(cacheKey, fresh);
-            renderLoadout(fresh.loadout, fresh.inserted_at, force);
+            cacheLatestLoadout(targetId, fresh);
+            if (sameTargetId(currentTargetId(), targetId)) {
+                renderLoadout(fresh.loadout, fresh.inserted_at, force);
+            }
         }
+    }
+
+    function fetchAndRenderAutomaticLoadout() {
+        const targetId = currentTargetId();
+        if (!targetId || hasNativeDefenderLoadout(STATE.attackData?.defenderItems)) {
+            return Promise.resolve();
+        }
+
+        const key = String(targetId);
+        const existing = STATE.automaticLoadoutTasks.get(key);
+        if (existing) return existing;
+
+        const task = (async () => {
+            await waitForIdle();
+            if (!sameTargetId(currentTargetId(), targetId)) return;
+            if (hasNativeDefenderLoadout(STATE.attackData?.defenderItems)) return;
+            await fetchAndRenderLoadout(false, false);
+        })().finally(() => STATE.automaticLoadoutTasks.delete(key));
+
+        STATE.automaticLoadoutTasks.set(key, task);
+        return task;
     }
 
     async function fetchHistoryFromBackend(targetId, limit = CFG.historyLimit) {
@@ -1162,7 +1368,7 @@
         if (img && item.item_id) {
             const base = `https://www.torn.com/images/items/${item.item_id}/large`;
             img.src = `${base}.png`;
-            img.srcset = `${base}.png 1x, ${base}@2x.png 2x, ${base}@3x.png 3x, ${base}@4x.png 4x`;
+            img.srcset = `${base}.png 1x, ${base}@2x.png 2x`;
             img.alt = item.item_name || "";
             img.classList.remove("blank___W6Kh5");
             img.style.objectFit = "contain";
@@ -1336,12 +1542,13 @@
     function scheduleRenderIntegrityChecks(loadout, inserted) {
         clearRenderIntegrityTimers();
 
-        for (const delay of [250, 750, 1500, 3000]) {
+        for (const delay of [500, 1500, 3000]) {
             const timer = W.setTimeout(() => {
                 if (!STATE.loadoutRendered) return;
                 if (hasNativeDefenderLoadout(STATE.attackData?.defenderItems)) return;
                 if (hasRenderedArmorOverlays(loadout)) return;
 
+                clearRenderIntegrityTimers();
                 STATE.loadoutRendered = false;
                 renderLoadout(loadout, inserted, true, false);
             }, delay);
@@ -1435,7 +1642,7 @@
         if (res.ok && res.data?.ok) {
             clearDefenderSessionCache(defenderId);
             if (res.data.latest) {
-                sessionCacheSet(latestCacheKey(defenderId), res.data.latest);
+                cacheLatestLoadout(defenderId, res.data.latest);
             }
 
             rememberReportedLoadout(defenderId, reportState.fingerprint);
@@ -1917,6 +2124,29 @@
         return slotHasItemId(nativeMarker);
     }
 
+    function cancelStartupLoadoutFallback() {
+        if (!STATE.startupFallbackTimer) return;
+        W.clearTimeout(STATE.startupFallbackTimer);
+        STATE.startupFallbackTimer = null;
+    }
+
+    function scheduleStartupLoadoutFallback() {
+        if (STATE.startupFallbackTimer || STATE.attackData || !getAPIKey()) return;
+
+        STATE.startupFallbackTimer = W.setTimeout(() => {
+            STATE.startupFallbackTimer = null;
+            if (!STATE.attackData) void fetchAndRenderAutomaticLoadout();
+        }, CFG.startupFallbackMs);
+    }
+
+    function reportLoadoutWhenIdle(db) {
+        whenVisible(() => {
+            void waitForIdle()
+                .then(() => reportLoadout(db))
+                .catch(() => {});
+        });
+    }
+
     function processResponse(data) {
         if (!data || typeof data !== "object") return;
         if (!data.attackerUser && !data.DB?.attackerUser) return;
@@ -1927,8 +2157,11 @@
         const hadFightID = !!STATE.attackData?.fightID;
         const isFirstData = !STATE.attackData;
         const hasNativeLoadout = hasNativeDefenderLoadout(db?.defenderItems);
+        const targetChanged = !!(newDefenderId && oldDefenderId && newDefenderId !== oldDefenderId);
 
-        if (newDefenderId && oldDefenderId && newDefenderId !== oldDefenderId) {
+        cancelStartupLoadoutFallback();
+
+        if (targetChanged) {
             resetAttackState();
         }
 
@@ -1941,9 +2174,9 @@
 
         if (hasNativeLoadout && !STATE.uploaded) {
             STATE.uploaded = true;
-            whenVisible(() => reportLoadout(db));
-        } else if (isFirstData && !STATE.loadoutRendered) {
-            fetchAndRenderLoadout(true, false);
+            reportLoadoutWhenIdle(db);
+        } else if ((isFirstData || targetChanged) && !STATE.loadoutRendered) {
+            void fetchAndRenderAutomaticLoadout();
         }
     }
 
@@ -1991,7 +2224,7 @@
             panel.style.display = "block";
             toast("Enter your Public API key to join the war room.");
         } else {
-            fetchAndRenderLoadout(true, false);
+            scheduleStartupLoadoutFallback();
         }
 
         updateAuthStatus();
@@ -2000,10 +2233,7 @@
 
     const startPanelInit = () => {
         if (initPanel()) return;
-        waitForElement("[class*='players___eKiHL'], [class*='labelsContainer']", () => initPanel());
-        waitForElement("#defender_Primary, #defender_Secondary, #defender_Melee, [class*='playerArea']", () => {
-            if (!W.document.getElementById("loadout-panel")) initPanel(true);
-        });
+        waitForElement("[class*='players___eKiHL'], [class*='labelsContainer'], #defender_Primary, #defender_Secondary, #defender_Melee, [class*='playerArea']", () => initPanel(true));
     };
 
     if (W.document.readyState === "loading") {
