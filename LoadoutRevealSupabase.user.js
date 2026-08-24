@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.15
+// @version      3.7.16
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
@@ -20,7 +20,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.7.15";
+    const SCRIPT_VERSION = "3.7.16";
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -28,6 +28,7 @@
         apiBaseUrl: "https://loadout.grusmedia.no/loader-api",
         historyLimit: 10,
         cacheMaxAgeMs: 24 * 60 * 60 * 1000,
+        negativeCacheMaxAgeMs: 3 * 60 * 1000,
         latestRevalidateAfterMs: 5 * 60 * 1000,
         historyRevalidateAfterMs: 10 * 60 * 1000,
         tokenRefreshWindowMs: 10 * 60 * 1000,
@@ -360,14 +361,21 @@
         if (next.length !== index.length) writeSharedLatestIndex(next);
     }
 
-    function getSharedLatestCacheEntry(defenderId) {
-        const entry = readSharedCacheValue(sharedLatestStorageKey(defenderId));
-        const valid = entry
+    function latestCacheEntryMaxAge(entry) {
+        return entry?.data?.missing === true ? CFG.negativeCacheMaxAgeMs : CFG.cacheMaxAgeMs;
+    }
+
+    function isLatestCacheEntry(entry) {
+        return entry
             && typeof entry === "object"
             && Number.isFinite(Number(entry.cachedAt))
-            && entry.data?.loadout;
+            && (entry.data?.loadout || entry.data?.missing === true);
+    }
 
-        if (!valid || Date.now() - Number(entry.cachedAt) > CFG.cacheMaxAgeMs) {
+    function getSharedLatestCacheEntry(defenderId) {
+        const entry = readSharedCacheValue(sharedLatestStorageKey(defenderId));
+
+        if (!isLatestCacheEntry(entry) || Date.now() - Number(entry.cachedAt) > latestCacheEntryMaxAge(entry)) {
             if (entry) clearSharedLatestCache(defenderId);
             return null;
         }
@@ -395,8 +403,12 @@
     function getLatestCacheEntry(defenderId) {
         const key = latestCacheKey(defenderId);
         const sessionEntry = sessionCacheGetEntry(key);
-        if (sessionEntry && Date.now() - sessionEntry.cachedAt <= CFG.cacheMaxAgeMs && sessionEntry.data?.loadout) {
+        if (isLatestCacheEntry(sessionEntry) && Date.now() - sessionEntry.cachedAt <= latestCacheEntryMaxAge(sessionEntry)) {
             return sessionEntry;
+        }
+
+        if (sessionEntry) {
+            try { sessionStorage.removeItem(key); } catch {}
         }
 
         const sharedEntry = getSharedLatestCacheEntry(defenderId);
@@ -415,6 +427,10 @@
         sessionCacheSetEntry(latestCacheKey(defenderId), entry);
         setSharedLatestCacheEntry(defenderId, entry);
         return entry;
+    }
+
+    function cacheMissingLoadout(defenderId) {
+        cacheLatestLoadout(defenderId, { missing: true });
     }
 
     function historyCacheKey(defenderId, limit) {
@@ -1059,41 +1075,48 @@
         return null;
     }
 
-    function getCachedHistory(targetId, limit) {
-        return getCachedHistoryEntry(targetId, limit)?.data || null;
-    }
-
-    function getNewestCachedHistoryRow(targetId) {
-        const single = getCachedHistory(targetId, 1);
-        if (single?.[0]?.loadout) return single[0];
-
-        const full = getCachedHistory(targetId, CFG.historyLimit);
-        if (full?.[0]?.loadout) return full[0];
-
-        return null;
-    }
-
     async function fetchLatestFromBackend(targetId) {
         return dedupeBackendRequest(`latest:${targetId}`, async () => {
             const res = await authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/latest`, null);
             updateAuthStatus();
-            if (!res.ok || !res.data?.ok || !res.data?.loadout) return null;
-            return res.data.loadout;
+
+            if (res.ok && res.data?.ok && res.data?.loadout) {
+                return { ok: true, loadout: res.data.loadout };
+            }
+
+            const error = String(res.data?.error || res.data?.message || "");
+            const confirmedMissing = res.status === 404 && error === "No loadout found";
+            return { ok: confirmedMissing, loadout: null };
         });
     }
 
     async function fetchLatestFallbackFromHistory(targetId) {
-        const row = getNewestCachedHistoryRow(targetId) || (await fetchHistoryForTarget(targetId, 1))[0];
-        if (!row?.loadout) return null;
+        const cached = getCachedHistoryEntry(targetId, 1) || getCachedHistoryEntry(targetId, CFG.historyLimit);
+        const result = cached
+            ? { ok: true, history: cached.data }
+            : await fetchHistoryResultFromBackend(targetId, 1);
+        const row = result.history[0];
+
+        if (!row?.loadout) return { ok: result.ok, loadout: null };
 
         return {
-            loadout: row.loadout,
-            inserted_at: row.observed_at || row.inserted_at
+            ok: true,
+            loadout: {
+                loadout: row.loadout,
+                inserted_at: row.observed_at || row.inserted_at
+            }
         };
     }
 
     async function fetchLatestOrHistoryFallback(targetId) {
-        return await fetchLatestFromBackend(targetId) || await fetchLatestFallbackFromHistory(targetId);
+        const latest = await fetchLatestFromBackend(targetId);
+        if (latest.loadout) return latest.loadout;
+
+        const fallback = await fetchLatestFallbackFromHistory(targetId);
+        if (fallback.loadout) return fallback.loadout;
+
+        if (latest.ok && fallback.ok) cacheMissingLoadout(targetId);
+        return null;
     }
 
     async function silentRevalidateLatest(targetId, renderedCacheEntry = null) {
@@ -1131,7 +1154,9 @@
 
         if (!forceRefresh) {
             const entry = getLatestCacheEntry(targetId);
-            if (entry && (Date.now() - entry.cachedAt) <= CFG.cacheMaxAgeMs && entry.data?.loadout) {
+            if (entry?.data?.missing === true) return;
+
+            if (entry?.data?.loadout) {
                 if (sameTargetId(currentTargetId(), targetId)) {
                     renderLoadout(entry.data.loadout, entry.data.inserted_at, force);
                 }
@@ -1173,12 +1198,15 @@
         return task;
     }
 
-    async function fetchHistoryFromBackend(targetId, limit = CFG.historyLimit) {
+    async function fetchHistoryResultFromBackend(targetId, limit = CFG.historyLimit) {
         return dedupeBackendRequest(`history:${targetId}:${limit}`, async () => {
             const res = await authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/history?limit=${encodeURIComponent(limit)}`, null);
             updateAuthStatus();
-            if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) return [];
-            return res.data.history;
+            if (!res.ok || !res.data?.ok || !Array.isArray(res.data.history)) {
+                return { ok: false, history: [] };
+            }
+
+            return { ok: true, history: res.data.history };
         });
     }
 
@@ -1195,10 +1223,10 @@
             }
         }
 
-        const fresh = await fetchHistoryFromBackend(targetId, limit);
-        if (Array.isArray(fresh)) {
-            sessionCacheSet(cacheKey, fresh);
-            return fresh;
+        const result = await fetchHistoryResultFromBackend(targetId, limit);
+        if (result.ok) {
+            sessionCacheSet(cacheKey, result.history);
+            return result.history;
         }
 
         return [];
@@ -1210,9 +1238,9 @@
         STATE.historyRevalidateInFlight.add(key);
 
         try {
-            const fresh = await fetchHistoryFromBackend(targetId, limit);
-            if (!Array.isArray(fresh)) return;
-            sessionCacheSet(historyCacheKey(targetId, limit), fresh);
+            const result = await fetchHistoryResultFromBackend(targetId, limit);
+            if (!result.ok) return;
+            sessionCacheSet(historyCacheKey(targetId, limit), result.history);
         } finally {
             STATE.historyRevalidateInFlight.delete(key);
         }
@@ -1309,6 +1337,11 @@
 
     const INFINITY_SVG = `<span class="eternity___zfACp"><svg xmlns="http://www.w3.org/2000/svg" width="17" height="10" viewBox="0 0 17 10"><g><path d="M 12.3399 1.5 C 10.6799 1.5 9.64995 2.76 8.50995 3.95 C 7.35995 2.76 6.33995 1.5 4.66995 1.5 C 2.89995 1.51 1.47995 2.95 1.48995 4.72 C 1.48995 4.81 1.48995 4.91 1.49995 5 C 1.32995 6.76 2.62995 8.32 4.38995 8.49 C 4.47995 8.49 4.57995 8.5 4.66995 8.5 C 6.32995 8.5 7.35995 7.24 8.49995 6.05 C 9.64995 7.24 10.67 8.5 12.33 8.5 C 14.0999 8.49 15.5199 7.05 15.5099 5.28 C 15.5099 5.19 15.5099 5.09 15.4999 5 C 15.6699 3.24 14.3799 1.68 12.6199 1.51 C 12.5299 1.51 12.4299 1.5 12.3399 1.5 Z M 4.66995 7.33 C 3.52995 7.33 2.61995 6.4 2.61995 5.26 C 2.61995 5.17 2.61995 5.09 2.63995 5 C 2.48995 3.87 3.27995 2.84 4.40995 2.69 C 4.49995 2.68 4.57995 2.67 4.66995 2.67 C 6.01995 2.67 6.83995 3.87 7.79995 5 C 6.83995 6.14 6.01995 7.33 4.66995 7.33 Z M 12.3399 7.33 C 10.99 7.33 10.17 6.13 9.20995 5 C 10.17 3.86 10.99 2.67 12.3399 2.67 C 13.48 2.67 14.3899 3.61 14.3899 4.74 C 14.3899 4.83 14.3899 4.91 14.3699 5 C 14.5199 6.13 13.7299 7.16 12.5999 7.31 C 12.5099 7.32 12.4299 7.33 12.3399 7.33 Z" stroke-width="0"></path></g></svg></span>`;
 
+    function deprioritizeImage(img) {
+        img.decoding = "async";
+        img.setAttribute("fetchpriority", "low");
+    }
+
     function renderEmptySlot(wrapper, slot) {
         if (!wrapper || !SILHOUETTES[slot]) return;
 
@@ -1325,6 +1358,7 @@
 
         const img = queryFirst(overlay, ["[class*='weaponImage'] img", "img"]);
         if (img) {
+            deprioritizeImage(img);
             img.src = `/images/items/silhouettes/${SILHOUETTES[slot]}.svg`;
             img.srcset = "";
             img.classList.add("blank___W6Kh5");
@@ -1367,6 +1401,7 @@
         const img = queryFirst(wrapper, ["[class*='weaponImage'] img", "img"]);
         if (img && item.item_id) {
             const base = `https://www.torn.com/images/items/${item.item_id}/large`;
+            deprioritizeImage(img);
             img.src = `${base}.png`;
             img.srcset = `${base}.png 1x, ${base}@2x.png 2x`;
             img.alt = item.item_name || "";
@@ -1486,6 +1521,7 @@
 
             const img = W.document.createElement("img");
             img.className = "itemImg___r9DqK";
+            deprioritizeImage(img);
             img.src = `https://www.torn.com/images/v2/user_model/items/${item.item_id}${gender}.webp`;
             img.alt = "";
 
@@ -2184,20 +2220,21 @@
         W.__askeladsLoadoutFetchPatched = true;
         const origFetch = W.fetch;
 
-        W.fetch = async function (...args) {
+        W.fetch = function (...args) {
             const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
             if (!url.includes("sid=attackData")) {
                 return origFetch.apply(this, args);
             }
 
-            const response = await origFetch.apply(this, args);
-            try {
-                response.clone().text().then(text => {
-                    const parsed = parseJson(text);
-                    processResponse(parsed);
-                });
-            } catch {}
-            return response;
+            return origFetch.apply(this, args).then(response => {
+                try {
+                    void response.clone().text()
+                        .then(text => processResponse(parseJson(text)))
+                        .catch(() => {});
+                } catch {}
+
+                return response;
+            });
         };
     }
 
