@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.7.16
+// @version      3.8.0
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
+// @match        https://www.torn.com/profiles.php*
+// @match        https://www.torn.com/factions.php*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -20,7 +22,12 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.7.16";
+    const SCRIPT_VERSION = "3.8.0";
+    const PAGE = new URL(W.location.href);
+    const IS_ATTACK = PAGE.pathname === "/page.php" && PAGE.searchParams.get("sid") === "attack";
+    const IS_PROFILE = PAGE.pathname === "/profiles.php";
+    const IS_FACTION = PAGE.pathname === "/factions.php" && PAGE.searchParams.get("step") === "your";
+    if (!IS_ATTACK && !IS_PROFILE && !IS_FACTION) return;
     const PDA_KEY = "###PDA-APIKEY###";
     const IS_PDA = !PDA_KEY.includes("#");
 
@@ -36,10 +43,17 @@
         startupFallbackMs: 1500,
         idleWorkTimeoutMs: 750,
         sharedLatestCacheLimit: 200,
+        uploadRetryDelaysMs: [2000, 5000, 15000, 30000],
+        warCacheRefreshMs: 5 * 60 * 1000,
+        warRosterMaxAgeMs: 10 * 60 * 1000,
         store: {
             apiKey: "loadout_loader_api_key",
             backendToken: "loadout_loader_backend_token",
-            quietToasts: "loadout_loader_quiet_mode"
+            quietToasts: "loadout_loader_quiet_mode",
+            profile: "loadout_loader_show_profile",
+            attack: "loadout_loader_show_attack",
+            warCache: "loadout_loader_war_cache",
+            bonusLabels: "loadout_loader_bonus_labels"
         }
     };
 
@@ -59,7 +73,21 @@
         latestRevalidateInFlight: new Set(),
         historyRevalidateInFlight: new Set(),
         renderIntegrityTimers: [],
-        startupFallbackTimer: null
+        startupFallbackTimer: null,
+        captures: new Map(),
+        selected: null,
+        inlineHistory: [],
+        historyIndex: 0,
+        historyBusy: false,
+        viewGeneration: 0,
+        renderObserver: null,
+        renderFrame: null,
+        warCacheTimer: null,
+        warCacheBusy: false,
+        warRosterObserver: null,
+        warRosterTimer: null,
+        nativeStyles: new Map(),
+        profileMountObserver: null
     };
 
     function getLocalStorage(key) {
@@ -295,14 +323,21 @@
     }
 
     function latestCacheKey(defenderId) {
-        return `askelads:latest:${defenderId}`;
+        return `askelads:v2:${cacheScope()}:latest:${defenderId}`;
     }
 
     const SHARED_LATEST_CACHE_INDEX_KEY = "loadout_loader_latest_cache_index_v1";
-    const SHARED_LATEST_CACHE_PREFIX = "loadout_loader_latest_cache_v1:";
+    const SHARED_LATEST_CACHE_PREFIX = "loadout_loader_latest_cache_v2:";
+
+    function cacheScope() {
+        const user = parseJwtPayload(getBackendToken());
+        return `${user?.player_id || 0}:${user?.faction_id || 0}`;
+    }
+
+    function preference(name) { return getStoredValue(CFG.store[name]) !== "0"; }
 
     function sharedLatestStorageKey(defenderId) {
-        return `${SHARED_LATEST_CACHE_PREFIX}${defenderId}`;
+        return `${SHARED_LATEST_CACHE_PREFIX}${cacheScope()}:${defenderId}`;
     }
 
     function readSharedCacheValue(key) {
@@ -344,12 +379,12 @@
     }
 
     function readSharedLatestIndex() {
-        const value = readSharedCacheValue(SHARED_LATEST_CACHE_INDEX_KEY);
+        const value = readSharedCacheValue(`${SHARED_LATEST_CACHE_INDEX_KEY}:${cacheScope()}`);
         return Array.isArray(value) ? value : [];
     }
 
     function writeSharedLatestIndex(entries) {
-        writeSharedCacheValue(SHARED_LATEST_CACHE_INDEX_KEY, entries);
+        writeSharedCacheValue(`${SHARED_LATEST_CACHE_INDEX_KEY}:${cacheScope()}`, entries);
     }
 
     function clearSharedLatestCache(defenderId) {
@@ -403,6 +438,11 @@
     function getLatestCacheEntry(defenderId) {
         const key = latestCacheKey(defenderId);
         const sessionEntry = sessionCacheGetEntry(key);
+        const sharedEntry = getSharedLatestCacheEntry(defenderId);
+        if (sharedEntry && (!isLatestCacheEntry(sessionEntry) || sharedEntry.cachedAt > sessionEntry.cachedAt)) {
+            sessionCacheSetEntry(key, sharedEntry);
+            return sharedEntry;
+        }
         if (isLatestCacheEntry(sessionEntry) && Date.now() - sessionEntry.cachedAt <= latestCacheEntryMaxAge(sessionEntry)) {
             return sessionEntry;
         }
@@ -411,7 +451,6 @@
             try { sessionStorage.removeItem(key); } catch {}
         }
 
-        const sharedEntry = getSharedLatestCacheEntry(defenderId);
         if (!sharedEntry) return null;
 
         sessionCacheSetEntry(key, sharedEntry);
@@ -419,6 +458,7 @@
     }
 
     function cacheLatestLoadout(defenderId, data) {
+        if (data?.loadout) data = { ...data, inserted_at: data.captured_at || data.updated_at || data.inserted_at };
         const entry = {
             cachedAt: Date.now(),
             data
@@ -434,7 +474,7 @@
     }
 
     function historyCacheKey(defenderId, limit) {
-        return `askelads:history:${defenderId}:${limit}`;
+        return `askelads:v2:${cacheScope()}:history:${defenderId}:${limit}`;
     }
 
     function lastReportCacheKey(defenderId) {
@@ -442,8 +482,8 @@
     }
 
     function clearDefenderSessionCache(defenderId) {
-        clearSessionCachePrefix(`askelads:latest:${defenderId}`);
-        clearSessionCachePrefix(`askelads:history:${defenderId}:`);
+        try { sessionStorage.removeItem(latestCacheKey(defenderId)); } catch {}
+        clearSessionCachePrefix(`askelads:v2:${cacheScope()}:history:${defenderId}:`);
         clearSharedLatestCache(defenderId);
     }
 
@@ -461,12 +501,26 @@
         STATE.loadoutRendered = false;
         clearRenderIntegrityTimers();
         cleanupScriptOverlays();
+        STATE.viewGeneration++;
+        STATE.selected = null;
+        STATE.inlineHistory = [];
+        STATE.historyIndex = 0;
+        STATE.historyBusy = false;
+        STATE.renderObserver?.disconnect();
+        STATE.renderObserver = null;
     }
 
     function cleanupScriptOverlays() {
         W.document
             .querySelectorAll(".ll-slot-overlay, .ll-armor-overlay, .ll-armor-layer, .ll-armor-map")
             .forEach(el => el.remove());
+        for (const [element, previous] of STATE.nativeStyles) {
+            for (const [key, value] of Object.entries(previous)) {
+                if (key === "usemap") value === null ? element.removeAttribute(key) : element.setAttribute(key, value);
+                else element.style[key] = value;
+            }
+        }
+        STATE.nativeStyles.clear();
     }
 
     function clearRenderIntegrityTimers() {
@@ -581,15 +635,24 @@
         toast(warning.message || API_ERRORS[code] || `Backend warning: ${code}`, 10000);
     }
 
-    function wrapApiResponse(status, text) {
+    function wrapApiResponse(status, text, headers = "") {
         const data = parseJson(text);
         handleBackendWarning(data);
 
         return {
             ok: status >= 200 && status < 300,
             status,
-            data
+            data,
+            retryAfterMs: retryAfterDelay(headers)
         };
+    }
+
+    function retryAfterDelay(headers) {
+        const value = typeof headers?.get === "function" ? headers.get("retry-after")
+            : typeof headers === "string" ? headers.match(/^retry-after:\s*(.+)$/im)?.[1]?.trim() : headers?.["retry-after"];
+        if (!value) return 0;
+        const seconds = Number(value);
+        return Math.max(0, Number.isFinite(seconds) ? seconds * 1000 : (Date.parse(value) - Date.now()) || 0);
     }
 
     function buildApiUrl(path) {
@@ -645,7 +708,7 @@
                 headers["X-Loadout-Token"] = token;
             }
 
-            const apiKey = getAPIKey();
+            const apiKey = path === "/loadouts/report" ? getAPIKey() : null;
             if (apiKey) headers["X-Torn-Api-Key"] = apiKey;
         }
 
@@ -656,7 +719,7 @@
                 : bridge.callHandler(handler, url, headers, body ? JSON.stringify(body) : "");
 
             return withRequestTimeout(call
-                .then(r => wrapApiResponse(Number(r?.status || 0), String(r?.responseText || "")))
+                .then(r => wrapApiResponse(Number(r?.status || 0), String(r?.responseText || ""), r?.responseHeaders || r?.headers))
                 .catch(() => failedRequest()));
         }
 
@@ -668,7 +731,7 @@
                     headers,
                     timeout: CFG.requestTimeoutMs,
                     ...(body ? { data: JSON.stringify(body) } : {}),
-                    onload: (r) => resolve(wrapApiResponse(r.status, r.responseText)),
+                    onload: (r) => resolve(wrapApiResponse(r.status, r.responseText, r.responseHeaders)),
                     onerror: () => resolve(failedRequest()),
                     ontimeout: () => resolve(requestTimeout())
                 });
@@ -680,7 +743,7 @@
             headers,
             ...(body ? { body: JSON.stringify(body) } : {})
         })
-            .then(async (r) => wrapApiResponse(r.status, await r.text()))
+            .then(async (r) => wrapApiResponse(r.status, await r.text(), r.headers))
             .catch(() => failedRequest());
     }
 
@@ -873,6 +936,8 @@
 
         const itemId = extractItemId(raw);
         if (!itemId) return null;
+        const rawClip = raw?.clip_size ?? raw?.clipSize ?? raw?.clipsize ?? raw?.clip;
+        const clipSize = rawClip != null && rawClip !== "" && Number.isSafeInteger(Number(rawClip)) && Number(rawClip) >= 0 ? Number(rawClip) : null;
 
         return {
             item_id: itemId,
@@ -881,7 +946,7 @@
             accuracy: raw?.acc != null ? Number(raw.acc) : raw?.accuracy != null ? Number(raw.accuracy) : null,
             rarity: mapGlowClassToRarity(raw?.glowClass || raw?.rarity || ""),
             ammo_type: extractAmmoType(raw),
-            clip_size: raw?.clip_size ?? raw?.clipSize ?? raw?.clipsize ?? raw?.clip ?? null,
+            clip_size: clipSize,
             mods: normalizeMods(raw?.currentUpgrades || raw?.mods || raw?.attachments || []),
             bonuses: normalizeBonuses(raw?.currentBonuses || raw?.bonuses || [])
         };
@@ -995,7 +1060,7 @@
 
     function urlTargetId() {
         try {
-            const id = new URL(W.location.href).searchParams.get("user2ID");
+            const id = new URL(W.location.href).searchParams.get(IS_PROFILE ? "XID" : "user2ID");
             return id && /^\d+$/.test(id) ? Number(id) : null;
         } catch {
             return null;
@@ -1007,7 +1072,7 @@
     }
 
     function currentTargetId() {
-        return extractUserId(STATE.attackData?.defenderUser) || urlTargetId();
+        return urlTargetId() || extractUserId(STATE.attackData?.defenderUser);
     }
 
     function currentTargetName() {
@@ -1053,7 +1118,8 @@
         sessionCacheSet(lastReportCacheKey(defenderId), { fingerprint });
     }
 
-    function dedupeBackendRequest(key, fn) {
+    function dedupeBackendRequest(requestKey, fn) {
+        const key = cacheScope() + ":" + requestKey;
         if (STATE.backendRequestsInFlight.has(key)) {
             return STATE.backendRequestsInFlight.get(key);
         }
@@ -1080,7 +1146,8 @@
             const res = await authorizedRequest("GET", `/loadouts/${encodeURIComponent(targetId)}/latest`, null);
             updateAuthStatus();
 
-            if (res.ok && res.data?.ok && res.data?.loadout) {
+            if (res.ok && res.data?.ok && savedLoadoutIsValid(res.data?.loadout, targetId)) {
+                res.data.loadout.inserted_at = res.data.loadout.captured_at || res.data.loadout.updated_at || res.data.loadout.inserted_at;
                 return { ok: true, loadout: res.data.loadout };
             }
 
@@ -1097,7 +1164,7 @@
             : await fetchHistoryResultFromBackend(targetId, 1);
         const row = result.history[0];
 
-        if (!row?.loadout) return { ok: result.ok, loadout: null };
+        if (!savedLoadoutIsValid(row, targetId)) return { ok: result.ok, loadout: null };
 
         return {
             ok: true,
@@ -1120,12 +1187,15 @@
     }
 
     async function silentRevalidateLatest(targetId, renderedCacheEntry = null) {
+        const authKey = getAPIKey();
+        const generation = STATE.viewGeneration;
         const id = String(targetId);
         if (STATE.latestRevalidateInFlight.has(id)) return;
         STATE.latestRevalidateInFlight.add(id);
 
         try {
             const fresh = await fetchLatestOrHistoryFallback(targetId);
+            if (authKey !== getAPIKey() || generation !== STATE.viewGeneration) return;
             if (!fresh?.loadout) return;
 
             const currentCached = renderedCacheEntry || getLatestCacheEntry(targetId);
@@ -1134,7 +1204,7 @@
             cacheLatestLoadout(targetId, fresh);
 
             if (!previousData || !deepEqualJson(previousData, fresh)) {
-                if (sameTargetId(currentTargetId(), id)) {
+                if (sameTargetId(currentTargetId(), id) && STATE.historyIndex === 0) {
                     STATE.loadoutRendered = false;
                     renderLoadout(fresh.loadout, fresh.inserted_at, true);
                 }
@@ -1147,10 +1217,11 @@
     async function fetchAndRenderLoadout(force = false, forceRefresh = false) {
         const targetId = currentTargetId();
         if (!targetId) return;
-
+        const generation = STATE.viewGeneration;
+        const key = getAPIKey();
         const authorized = await ensureAuthorized(false);
         updateAuthStatus();
-        if (!authorized) return;
+        if (!authorized || key !== getAPIKey() || generation !== STATE.viewGeneration) return;
 
         if (!forceRefresh) {
             const entry = getLatestCacheEntry(targetId);
@@ -1169,6 +1240,7 @@
         }
 
         const fresh = await fetchLatestOrHistoryFallback(targetId);
+        if (key !== getAPIKey() || generation !== STATE.viewGeneration) return;
         if (fresh?.loadout) {
             cacheLatestLoadout(targetId, fresh);
             if (sameTargetId(currentTargetId(), targetId)) {
@@ -1233,13 +1305,14 @@
     }
 
     async function silentRevalidateHistory(targetId, limit = CFG.historyLimit) {
+        const scope = cacheScope();
         const key = `${targetId}:${limit}`;
         if (STATE.historyRevalidateInFlight.has(key)) return;
         STATE.historyRevalidateInFlight.add(key);
 
         try {
             const result = await fetchHistoryResultFromBackend(targetId, limit);
-            if (!result.ok) return;
+            if (!result.ok || scope !== cacheScope()) return;
             sessionCacheSet(historyCacheKey(targetId, limit), result.history);
         } finally {
             STATE.historyRevalidateInFlight.delete(key);
@@ -1284,7 +1357,7 @@
         }
 
         const areas = W.document.querySelectorAll("[class*='playerArea']");
-        return (areas.length > 1 ? areas[1] : areas[0]) || null;
+        return (areas.length > 1 ? areas[1] : null) || null;
     }
 
     function buildIconHtml(icon, title, desc) {
@@ -1344,11 +1417,15 @@
 
     function renderEmptySlot(wrapper, slot) {
         if (!wrapper || !SILHOUETTES[slot]) return;
-
-        wrapper.querySelector(".ll-slot-overlay")?.remove();
+        const existing = wrapper.querySelector(":scope > .ll-slot-overlay");
+        if (existing?.dataset.fingerprint === "empty") return;
+        existing?.remove();
+        rememberNativeStyle(wrapper, ["position"]);
         wrapper.style.position = "relative";
 
         const overlay = wrapper.cloneNode(true);
+        sanitizeOverlayClone(overlay);
+        overlay.dataset.fingerprint = "empty";
         overlay.classList.add("ll-slot-overlay");
         overlay.classList.remove(...[...overlay.classList].filter(c => /^glow-/.test(c) || /emptySlot/i.test(c)));
         overlay.style.cssText += ";position:absolute;top:0;left:0;width:100%;height:100%;z-index:10;box-sizing:border-box;";
@@ -1374,13 +1451,19 @@
 
     function renderSlot(wrapper, item, slotLabel, includeLabel = true, slot = 0) {
         if (!wrapper || !item) return;
-
-        wrapper.querySelector(".ll-slot-overlay")?.remove();
+        const fingerprint = loadoutFingerprint(item) + preference("bonusLabels");
+        const existing = wrapper.querySelector(":scope > .ll-slot-overlay");
+        if (existing?.dataset.fingerprint === fingerprint) return;
+        const retainedImage = existing?.querySelector("img");
+        existing?.remove();
 
         const overlay = wrapper.cloneNode(true);
+        sanitizeOverlayClone(overlay);
+        overlay.dataset.fingerprint = fingerprint;
         overlay.classList.add("ll-slot-overlay");
         overlay.classList.remove(...[...overlay.classList].filter(c => /^glow-/.test(c) || /emptySlot/i.test(c)));
         overlay.style.cssText += ";position:absolute;top:0;left:0;width:100%;height:100%;z-index:10;box-sizing:border-box;";
+        rememberNativeStyle(wrapper, ["position"]);
         wrapper.style.position = "relative";
         wrapper.appendChild(overlay);
         wrapper = overlay;
@@ -1407,6 +1490,10 @@
             img.alt = item.item_name || "";
             img.classList.remove("blank___W6Kh5");
             img.style.objectFit = "contain";
+            if (retainedImage?.getAttribute("src") === img.getAttribute("src")) {
+                retainedImage.alt = img.alt;
+                img.replaceWith(retainedImage);
+            }
         }
 
         const top = queryFirst(wrapper, ["[class*='top___']"]);
@@ -1458,24 +1545,20 @@
         }
 
         weaponName.textContent = item.item_name || "";
+        if (preference("bonusLabels") && item.bonuses?.length) {
+            const labels = W.document.createElement("span");
+            labels.className = "ll-bonus-labels";
+            labels.textContent = item.bonuses.map(b => b.name).filter(Boolean).join(" · ");
+            labels.style.cssText = "display:block;font-size:9px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+            labels.title = item.bonuses.map(b => [b.name, b.description].filter(Boolean).join(": ")).join("\n");
+            weaponName.appendChild(labels);
+        }
         wrapper.setAttribute("aria-label", item.item_name || "Unknown");
     }
 
     function renderArmor(defenderArea, loadout) {
         const bodyImg =
             queryFirst(defenderArea, [
-                "[class*='bodyImage']",
-                "img[src*='body-m']",
-                "img[src*='body-f']",
-                "img[src*='model']"
-            ]) ||
-            queryFirst(W.document, [
-                "[class*='defender'] [class*='bodyImage']",
-                "[class*='defender'] img[src*='body-m']",
-                "[class*='defender'] img[src*='body-f']",
-                "[class*='playerArea']:nth-of-type(2) [class*='bodyImage']",
-                "[class*='playerArea']:nth-of-type(2) img[src*='body-m']",
-                "[class*='playerArea']:nth-of-type(2) img[src*='body-f']",
                 "[class*='bodyImage']",
                 "img[src*='body-m']",
                 "img[src*='body-f']",
@@ -1493,18 +1576,17 @@
             queryFirst(modelRoot, ["[class*='armoursWrap']"]) ||
             queryFirst(defenderArea, ["[class*='armoursWrap']"]);
 
-        if (!armoursWrap) {
-            const wraps = Array.from(W.document.querySelectorAll("[class*='armoursWrap']"));
-            armoursWrap = wraps[1] || wraps[0] || null;
-        }
-
-        if (!armoursWrap) return;
+        if (!armoursWrap || !defenderArea.contains(armoursWrap)) return;
 
         const src = bodyImg.getAttribute("src") || "";
         const gender = /body-f[.@/]/.test(src) || src.includes("body-f") ? "f" : "m";
 
+        const fingerprint = loadoutFingerprint(Object.fromEntries([4, 6, 7, 8, 9].map(slot => [slot, loadout[slot] || null]))) + gender;
+        if (armoursWrap.dataset.llFingerprint === fingerprint && hasRenderedArmorOverlays(loadout)) return;
+        armoursWrap.dataset.llFingerprint = fingerprint;
+        const retainedImages = new Map([...armoursWrap.querySelectorAll(".ll-armor-layer img")].map(img => [img.getAttribute("src"), img]));
         armoursWrap.querySelectorAll(".ll-armor-layer").forEach(el => el.remove());
-        W.document.querySelector(".ll-armor-map")?.remove();
+        defenderArea.querySelector(".ll-armor-map")?.remove();
 
         const frag = W.document.createDocumentFragment();
 
@@ -1531,7 +1613,7 @@
                 img.src = `https://www.torn.com/images/v2/items/model-items/${item.item_id}m.png`;
             };
 
-            armor.appendChild(img);
+            armor.appendChild(retainedImages.get(img.getAttribute("src")) || img);
             container.appendChild(armor);
             frag.appendChild(container);
         }
@@ -1558,6 +1640,7 @@
         }
 
         bodyImg.parentNode.appendChild(map);
+        if (!STATE.nativeStyles.has(bodyImg)) STATE.nativeStyles.set(bodyImg, { usemap: bodyImg.getAttribute("usemap") });
         bodyImg.setAttribute("usemap", `#${MAP_NAME}`);
     }
 
@@ -1593,14 +1676,353 @@
         }
     }
 
-    function renderLoadout(loadout, inserted, force = false, scheduleIntegrity = true) {
-        if (!loadout || (STATE.loadoutRendered && !force) || hasNativeDefenderLoadout(STATE.attackData?.defenderItems)) return;
+    function savedLoadoutIsValid(row, targetId) {
+        if (!row || !row.loadout || typeof row.loadout !== "object" || Array.isArray(row.loadout)) return false;
+        if (row.defender_id != null && !sameTargetId(row.defender_id, targetId)) return false;
+        const slots = Object.entries(row.loadout);
+        return slots.length > 0 && slots.length <= 9 && slots.every(([slot, item]) =>
+            /^[1-9]$/.test(slot) && Number.isSafeInteger(Number(item?.item_id)) && Number(item.item_id) > 0 &&
+            typeof item.item_name === "string");
+    }
 
+    function addViewerStyles() {
+        if (W.document.getElementById("ll-viewer-styles")) return;
+        const style = W.document.createElement("style");
+        style.id = "ll-viewer-styles";
+        style.textContent = [
+            "#ll-profile{margin:12px 0;border:1px solid #6666;border-radius:8px;background:var(--default-bg-panel-color,#242424);color:var(--default-color,#ddd);font:12px/1.45 Arial,sans-serif}",
+            "#ll-profile>summary{padding:10px;cursor:pointer;font-weight:bold}",
+            "#ll-profile .ll-profile-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:0 10px 8px}",
+            "#ll-profile .ll-profile-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;padding:10px}",
+            "#ll-profile .ll-profile-item{display:flex;align-items:center;gap:8px;min-width:0;padding:7px;background:#8881;border:1px solid #7773;border-radius:5px}",
+            "#ll-profile .ll-profile-item img{width:46px;height:46px;object-fit:contain;flex-shrink:0}",
+            "#ll-profile .ll-profile-item strong{display:block} #ll-profile .ll-profile-item small{display:block;opacity:.8}",
+            "#ll-profile .ll-profile-age{font-weight:normal;opacity:.75;margin-left:8px}",
+            ".ll-inline-controls{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap}",
+            ".ll-inline-controls button{border:1px solid #8887;border-radius:5px;background:#7772;color:inherit;padding:4px 7px;cursor:pointer;font:inherit}",
+            ".ll-inline-controls button:disabled{opacity:.45;cursor:default}",
+            "#loadout-panel{flex-wrap:wrap;max-width:100%} #loadout-panel .ll-inline-controls{color:#d7c093}",
+            "#loadout-retry-save[hidden]{display:none}"
+        ].join("\n");
+        (W.document.head || W.document.documentElement).appendChild(style);
+    }
+
+    function ensureProfilePanel() {
+        let panel = W.document.getElementById("ll-profile");
+        if (panel) return panel;
+        const root = W.document.querySelector(".user-profile, #profileroot");
+        const anchor = root?.querySelector(".basic-information")?.closest(".profile-wrapper") ||
+            root?.querySelector(".profile-wrapper");
+        if (!anchor) return null;
+        addViewerStyles();
+        panel = W.document.createElement("details");
+        panel.id = "ll-profile";
+        panel.open = getStoredValue("loadout_loader_profile_collapsed") !== "1";
+        panel.innerHTML = '<summary>Saved loadout<span class="ll-profile-age"></span></summary><div class="ll-profile-head"></div><div class="ll-profile-grid"></div>';
+        panel.addEventListener("toggle", () => setStoredValue("loadout_loader_profile_collapsed", panel.open ? "0" : "1"));
+        anchor.after(panel);
+        const { host, toastHost } = createPanel();
+        panel.querySelector(".ll-profile-head").appendChild(host);
+        if (!W.document.getElementById("loadout-toast-host")) W.document.body.appendChild(toastHost);
+        mountInlineControls(panel.querySelector(".ll-profile-head"));
+        return panel;
+    }
+
+    function renderProfileLoadout(loadout, inserted) {
+        if (!IS_PROFILE || !preference("profile")) return;
+        const targetId = currentTargetId();
+        if (!savedLoadoutIsValid({ loadout }, targetId)) return;
+        const panel = ensureProfilePanel();
+        if (!panel) return;
+        STATE.selected = { loadout, inserted_at: inserted, targetId };
+        const stamp = panel.querySelector(".ll-profile-age");
+        const time = Date.parse(inserted);
+        stamp.textContent = Number.isFinite(time) ? " · " + relativeTime(Math.max(0, Date.now() - time)) : " · time unknown";
+        stamp.title = Number.isFinite(time) ? "Observed " + new Date(time).toLocaleString() : "";
+        const grid = panel.querySelector(".ll-profile-grid");
+        grid.querySelector(".ll-profile-message")?.remove();
+        const labels = { 1: "Primary", 2: "Secondary", 3: "Melee", 4: "Body", 5: "Temporary", 6: "Head", 7: "Legs", 8: "Feet", 9: "Hands" };
+        for (const slot of Object.keys(labels)) {
+            const item = loadout[slot];
+            let card = grid.querySelector('[data-slot="' + slot + '"]');
+            if (!item) { card?.remove(); continue; }
+            const fingerprint = loadoutFingerprint(item) + preference("bonusLabels");
+            if (card?.dataset.fingerprint === fingerprint) continue;
+            if (!card) {
+                card = W.document.createElement("div");
+                card.className = "ll-profile-item";
+                card.dataset.slot = slot;
+                const image = W.document.createElement("img");
+                image.loading = "lazy";
+                deprioritizeImage(image);
+                card.append(image, W.document.createElement("div"));
+                grid.appendChild(card);
+            }
+            card.dataset.fingerprint = fingerprint;
+            const image = card.querySelector("img");
+            const src = "https://www.torn.com/images/items/" + Number(item.item_id) + "/large.png";
+            if (image.getAttribute("src") !== src) image.src = src;
+            image.alt = item.item_name;
+            const info = card.lastElementChild;
+            info.replaceChildren();
+            const name = W.document.createElement("strong");
+            name.textContent = item.item_name;
+            const stats = W.document.createElement("small");
+            stats.textContent = labels[slot] + (item.damage != null ? " · DMG " + formatFixed2(item.damage) : "") +
+                (item.accuracy != null ? " · ACC " + formatFixed2(item.accuracy) : "");
+            info.append(name, stats);
+            const bonuses = [...(item.bonuses || []), ...(item.mods || [])];
+            card.title = bonuses.map(b => [b.name, b.description].filter(Boolean).join(": ")).join("\n");
+            if (preference("bonusLabels") && bonuses.length) {
+                const bonus = W.document.createElement("small");
+                bonus.textContent = bonuses.map(b => b.name).filter(Boolean).join(" · ");
+                info.appendChild(bonus);
+            }
+        }
+        mountInlineControls(panel.querySelector(".ll-profile-head"));
+    }
+
+    function mountInlineControls(parent) {
+        if (!parent || IS_FACTION) return;
+        addViewerStyles();
+        let controls = parent.querySelector(":scope > .ll-inline-controls");
+        if (!controls) {
+            controls = W.document.createElement("span");
+            controls.className = "ll-inline-controls";
+            for (const [action, label, title] of [["older", "‹", "Older saved loadout"], ["newer", "›", "Newer saved loadout"], ["copy", "Copy", "Copy the displayed loadout"]]) {
+                const button = W.document.createElement("button");
+                button.type = "button";
+                button.dataset.action = action;
+                button.textContent = label;
+                button.title = title;
+                button.setAttribute("aria-label", title);
+                button.onclick = () => action === "copy" ? void copySelectedLoadout(button) : void navigateHistory(action === "older" ? 1 : -1);
+                controls.appendChild(button);
+            }
+            parent.appendChild(controls);
+        }
+        const native = IS_ATTACK && hasNativeDefenderLoadout(STATE.attackData?.defenderItems);
+        controls.querySelector('[data-action="older"]').disabled = !STATE.selected || STATE.historyBusy || native ||
+            (STATE.inlineHistory.length > 0 && STATE.historyIndex >= STATE.inlineHistory.length - 1);
+        controls.querySelector('[data-action="newer"]').disabled = STATE.historyBusy || native || STATE.historyIndex === 0;
+        controls.querySelector('[data-action="copy"]').disabled = !STATE.selected;
+    }
+
+    async function navigateHistory(direction) {
+        if (STATE.historyBusy || !STATE.selected) return;
+        const targetId = currentTargetId();
+        const generation = STATE.viewGeneration;
+        STATE.historyBusy = true;
+        try {
+            if (!STATE.inlineHistory.length) {
+                const rows = await fetchHistoryForCurrentTarget();
+                if (generation !== STATE.viewGeneration || !sameTargetId(targetId, currentTargetId())) return;
+                STATE.inlineHistory = [STATE.selected, ...rows.filter(row => savedLoadoutIsValid(row, targetId)).map(row =>
+                    ({ ...row, inserted_at: row.observed_at || row.inserted_at }))].filter((row, index, all) =>
+                        index === 0 || loadoutFingerprint(row.loadout) !== loadoutFingerprint(all[index - 1].loadout));
+            }
+            STATE.historyIndex = Math.max(0, Math.min(STATE.inlineHistory.length - 1, STATE.historyIndex + direction));
+            const row = STATE.inlineHistory[STATE.historyIndex];
+            if (row) renderLoadout(row.loadout, row.inserted_at, true);
+        } finally {
+            STATE.historyBusy = false;
+            W.document.querySelectorAll(".ll-inline-controls").forEach(node => mountInlineControls(node.parentElement));
+        }
+    }
+
+    async function copySelectedLoadout(button) {
+        const selected = STATE.selected;
+        if (!selected || !sameTargetId(selected.targetId, currentTargetId())) return;
+        const lines = ["Saved loadout [" + selected.targetId + "]", "Observed: " + (selected.inserted_at || "Unknown")];
+        for (const item of Object.values(selected.loadout)) {
+            lines.push(item.item_name + (item.damage != null ? " · DMG " + formatFixed2(item.damage) : "") +
+                (item.accuracy != null ? " · ACC " + formatFixed2(item.accuracy) : "") +
+                (item.bonuses?.length ? " · " + item.bonuses.map(b => [b.name, b.description].filter(Boolean).join(": ")).join("; ") : ""));
+        }
+        try {
+            await W.navigator.clipboard.writeText(lines.join("\n"));
+            button.textContent = "Copied";
+            W.setTimeout(() => { button.textContent = "Copy"; }, 1500);
+        } catch { W.prompt("Copy saved loadout", lines.join("\n")); }
+    }
+
+    function profileMessage(text) {
+        const panel = ensureProfilePanel();
+        const grid = panel?.querySelector(".ll-profile-grid");
+        if (!grid || STATE.selected) return;
+        grid.replaceChildren();
+        const message = W.document.createElement("span");
+        message.className = "ll-profile-message";
+        message.textContent = text;
+        grid.appendChild(message);
+    }
+
+    async function initProfileView() {
+        if (!IS_PROFILE) return;
+        const panel = ensureProfilePanel();
+        if (!panel) return;
+        if (!preference("profile")) { profileMessage("Profile loadouts are off. Enable them in Askelads settings."); return; }
+        if (!getAPIKey()) { profileMessage("Add your key in Askelads settings to view saved equipment."); return; }
+        profileMessage("Loading saved equipment…");
+        await fetchAndRenderLoadout(true);
+        if (!STATE.selected) profileMessage("No saved equipment available. Use Show Latest to retry.");
+    }
+
+    function cacheWarItems(items, missing) {
+        const at = Date.now();
+        const entries = [];
+        for (const row of items) {
+            if (!savedLoadoutIsValid(row, row.defender_id)) continue;
+            const id = String(row.defender_id);
+            const entry = { cachedAt: at, data: { ...row, inserted_at: row.captured_at || row.updated_at || row.inserted_at } };
+            const existing = getLatestCacheEntry(id);
+            if (existing?.data?.loadout && Date.parse(existing.data.inserted_at) > Date.parse(entry.data.inserted_at)) continue;
+            writeSharedCacheValue(sharedLatestStorageKey(id), entry);
+            sessionCacheSetEntry(latestCacheKey(id), entry);
+            entries.push({ id, cachedAt: at });
+        }
+        for (const id of missing) {
+            if (!Number.isSafeInteger(Number(id)) || Number(id) <= 0 || getLatestCacheEntry(id)?.data?.loadout) continue;
+            const entry = { cachedAt: at, data: { missing: true } };
+            writeSharedCacheValue(sharedLatestStorageKey(id), entry);
+            sessionCacheSetEntry(latestCacheKey(id), entry);
+            entries.push({ id: String(id), cachedAt: at });
+        }
+        const ids = new Set(entries.map(entry => entry.id));
+        const index = [...entries, ...readSharedLatestIndex().filter(entry => !ids.has(String(entry.id)))];
+        for (const entry of index.slice(CFG.sharedLatestCacheLimit)) deleteSharedCacheValue(sharedLatestStorageKey(entry.id));
+        writeSharedLatestIndex(index.slice(0, CFG.sharedLatestCacheLimit));
+    }
+
+    function normalizeRosterIds(values) {
+        if (!Array.isArray(values) || !values.length || values.length > 100 ||
+            values.some(id => !Number.isSafeInteger(id) || id <= 0)) return [];
+        return [...new Set(values)].sort((a, b) => a - b);
+    }
+
+    function readWarPageMemberIds() {
+        if (!IS_FACTION || !/^#\/war\/rank(?:[/?]|$)/.test(W.location.hash)) return [];
+        const rosters = [];
+        // Read only Torn's native enemy panel. Never scan the sidebar, our own
+        // faction or another script's target list, and never modify Torn's DOM.
+        for (const war of W.document.querySelectorAll(".faction-war")) {
+            if (!war.querySelector(".your-faction")) continue;
+            const enemy = war.querySelector(".enemy-faction");
+            if (!enemy) continue;
+            const ids = new Set();
+            for (const link of enemy.querySelectorAll("a[href]")) {
+                try {
+                    const url = new URL(link.getAttribute("href"), W.location.href);
+                    if (url.origin !== W.location.origin) continue;
+                    const raw = url.pathname === "/profiles.php" ? url.searchParams.get("XID") :
+                        url.pathname === "/page.php" && url.searchParams.get("sid") === "attack" ? url.searchParams.get("user2ID") : null;
+                    const id = Number(raw);
+                    if (Number.isSafeInteger(id) && id > 0) ids.add(id);
+                } catch {}
+            }
+            if (ids.size) rosters.push(normalizeRosterIds([...ids]));
+        }
+        return rosters.length === 1 ? rosters[0] : [];
+    }
+
+    function knownWarMemberIds() {
+        const key = "loadout_war_roster_v2:" + cacheScope();
+        const visibleIds = readWarPageMemberIds();
+        if (visibleIds.length) {
+            writeSharedCacheValue(key, { memberIds: visibleIds, observedAt: Date.now() });
+            return visibleIds;
+        }
+        const saved = readSharedCacheValue(key);
+        if (!saved || !Number.isFinite(saved.observedAt) || saved.observedAt > Date.now() ||
+            Date.now() - saved.observedAt >= CFG.warRosterMaxAgeMs) return [];
+        // The short-lived list is shared with profiles/attack tabs. Reading it
+        // does not extend its life: only seeing the native roster does.
+        return normalizeRosterIds(saved.memberIds);
+    }
+
+    function observeWarRoster() {
+        if (!IS_FACTION || STATE.warRosterObserver || !W.document.body) return;
+        const schedule = () => {
+            if (STATE.warRosterTimer) return;
+            STATE.warRosterTimer = W.setTimeout(() => {
+                STATE.warRosterTimer = null;
+                void warmWarCache();
+            }, 500);
+        };
+        STATE.warRosterObserver = new MutationObserver(records => {
+            const selector = ".faction-war, .enemy-faction, a[href*='profiles.php'], a[href*='user2ID']";
+            if (records.some(record => [...record.addedNodes, ...record.removedNodes].some(node =>
+                node.nodeType === 1 && (node.matches(selector) || node.querySelector(selector))))) schedule();
+        });
+        STATE.warRosterObserver.observe(W.document.body, { childList: true, subtree: true });
+        W.addEventListener("hashchange", schedule);
+    }
+
+    async function warmWarCache() {
+        if (!preference("warCache") || STATE.warCacheBusy || !getAPIKey() || W.document.visibilityState === "hidden") return;
+        STATE.warCacheBusy = true;
+        try {
+            // Background warming MUST NOT authenticate/renew a session: that
+            // would itself call Torn. Normal sign-in/on-demand use owns auth.
+            if (!tokenLooksUsable(getBackendToken())) {
+                showWarCacheStatus("Preloading waits for your normal loadout sign-in.");
+                return;
+            }
+            const scope = cacheScope();
+            const memberIds = knownWarMemberIds();
+            if (!memberIds.length) {
+                showWarCacheStatus("Open the ranked-war roster to preload enemies. No extra Torn API calls.");
+                return;
+            }
+            const key = "loadout_war_prefetch_v2:" + scope;
+            const current = readSharedCacheValue(key);
+            if (current?.retryAt > Date.now() || (current?.next > Date.now() &&
+                memberIds.every(id => current.memberIds?.includes(id)))) { showWarCacheStatus(current.message); return; }
+            // Short best-effort cross-tab lease; every request is to our cache only.
+            writeSharedCacheValue(key, { retryAt: Date.now() + 20_000, message: "Warming saved enemy loadouts…" });
+            const token = getBackendToken();
+            const response = await apiRequest("POST", "/loadouts/batch", { memberIds }, { auth: true });
+            if (scope !== cacheScope() || token !== getBackendToken() || !getAPIKey() || !preference("warCache")) return;
+            let message = "Preload unavailable; individual lookups still work.";
+            let success = false;
+            if (response.ok && response.data?.ok && Array.isArray(response.data.items) && Array.isArray(response.data.missing)) {
+                const wanted = new Set(memberIds);
+                const items = response.data.items.filter(row => row && wanted.has(row.defender_id)).slice(0, 100);
+                const missing = response.data.missing.filter(id => wanted.has(id)).slice(0, 100);
+                cacheWarItems(items, missing);
+                message = "Enemy cache: " + items.length + "/" + memberIds.length + " saved loadouts. No extra Torn API calls.";
+                success = true;
+            }
+            writeSharedCacheValue(key, { memberIds, next: success ? Date.now() + CFG.warCacheRefreshMs : 0,
+                retryAt: success ? 0 : Date.now() + 60_000, message });
+            showWarCacheStatus(message);
+        } catch {
+            showWarCacheStatus("War cache unavailable; individual lookups still work.");
+        } finally {
+            STATE.warCacheBusy = false;
+            W.clearTimeout(STATE.warCacheTimer);
+            STATE.warCacheTimer = W.setTimeout(() => { void warmWarCache(); }, 60_000);
+        }
+    }
+
+    function showWarCacheStatus(message) {
+        const node = W.document.getElementById("loadout-war-cache-status");
+        if (node) node.textContent = message || "";
+    }
+
+    function renderLoadout(loadout, inserted, force = false, scheduleIntegrity = true) {
+        if (!savedLoadoutIsValid({ loadout }, currentTargetId())) return;
+        if (IS_PROFILE) { renderProfileLoadout(loadout, inserted); return; }
+        if (!IS_ATTACK || !preference("attack")) return;
+        if (!loadout || (STATE.loadoutRendered && !force) || hasNativeDefenderLoadout(STATE.attackData?.defenderItems)) return;
+        const targetId = currentTargetId();
+        const generation = STATE.viewGeneration;
+        STATE.selected = { loadout, inserted_at: inserted, targetId };
         waitForElement("#defender_Primary, #defender_Secondary, #defender_Melee, #defender_Temporary, #attacker_Primary, [class*='playerArea']", () => {
+            if (!sameTargetId(currentTargetId(), targetId) || generation !== STATE.viewGeneration ||
+                hasNativeDefenderLoadout(STATE.attackData?.defenderItems) || !preference("attack")) return;
             const defenderArea = getDefenderArea();
             if (!defenderArea) return;
-
-            cleanupScriptOverlays();
 
             const hasDefender = !!defenderArea.querySelector("#defender_Primary");
             const hasAttacker = !!defenderArea.querySelector("#attacker_Primary");
@@ -1632,6 +2054,7 @@
 
             const modal = queryFirst(defenderArea, ["[class*='modal']"]);
             if (modal) {
+                rememberNativeStyle(modal, ["background", "backdropFilter", "webkitBackdropFilter", "pointerEvents"]);
                 modal.style.background = "transparent";
                 modal.style.backdropFilter = "none";
                 modal.style.webkitBackdropFilter = "none";
@@ -1648,11 +2071,48 @@
             }
 
             STATE.loadoutRendered = true;
+            mountInlineControls(W.document.getElementById("loadout-panel"));
+            watchAttackMount();
             if (scheduleIntegrity) scheduleRenderIntegrityChecks(loadout, inserted);
         });
     }
 
-    async function reportLoadout(raw) {
+    function rememberNativeStyle(element, keys) {
+        const original = STATE.nativeStyles.get(element) || {};
+        for (const key of keys) if (!(key in original)) original[key] = element.style[key];
+        STATE.nativeStyles.set(element, original);
+    }
+
+    function sanitizeOverlayClone(element) {
+        for (const node of [element, ...element.querySelectorAll("*")]) {
+            node.removeAttribute("id");
+            for (const attribute of [...node.attributes]) if (/^on/i.test(attribute.name)) node.removeAttribute(attribute.name);
+        }
+    }
+
+    function watchAttackMount() {
+        const root = W.document.querySelector("#attack-root") || getDefenderArea()?.parentElement;
+        if (!root || STATE.renderObserver?.root === root) return;
+        STATE.renderObserver?.disconnect();
+        const observer = new MutationObserver(records => {
+            if (!STATE.selected || STATE.renderFrame || !preference("attack") || hasNativeDefenderLoadout(STATE.attackData?.defenderItems)) return;
+            const relevant = records.some(record => !record.target.closest?.(".ll-slot-overlay, .ll-armor-map, #loadout-panel") &&
+                [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1 &&
+                    !node.matches?.(".ll-slot-overlay, .ll-armor-map, #loadout-panel")));
+            if (!relevant) return;
+            STATE.renderFrame = W.requestAnimationFrame(() => {
+                STATE.renderFrame = null;
+                const selected = STATE.selected;
+                if (selected && sameTargetId(selected.targetId, currentTargetId())) renderLoadout(selected.loadout, selected.inserted_at, true, false);
+                initPanel(true);
+            });
+        });
+        observer.root = root;
+        observer.observe(root, { childList: true, subtree: true });
+        STATE.renderObserver = observer;
+    }
+
+    function queueCapture(raw) {
         const attackerId = extractUserId(raw?.attackerUser);
         const defenderId = extractUserId(raw?.defenderUser);
         const attackerName = extractUserName(raw?.attackerUser) || getPageAttackerName();
@@ -1660,7 +2120,14 @@
         const defenderFactionId = raw?.defenderUser?.factionID ?? null;
         const loadout = extractLoadoutFromAttackData(raw);
 
-        if (!attackerId || !defenderId || !loadout) return;
+        if (!attackerId || !sameTargetId(defenderId, urlTargetId()) || !loadout || !getAPIKey()) return;
+        const identity = `${defenderId}:${raw.fightID || "visible"}:${loadoutFingerprint(loadout)}`;
+        if (STATE.captures.has(identity)) return;
+        if (STATE.captures.size >= 32) {
+            const old = [...STATE.captures].find(([, entry]) => entry.done || entry.failed);
+            if (!old) return;
+            STATE.captures.delete(old[0]);
+        }
 
         const reportState = getKnownReportState(defenderId, loadout);
         const payload = {
@@ -1669,31 +2136,65 @@
             defender_name: defenderName,
             attacker_name: attackerName,
             defender_faction_id: defenderFactionId,
-            loadout
+            loadout,
+            capture: { id: W.crypto.randomUUID(), observed_at: new Date().toISOString(), source: "native",
+                fight_id: raw.fightID == null ? null : String(raw.fightID), script_version: SCRIPT_VERSION }
         };
+        const entry = { payload, reportState, key: getAPIKey(), attempts: 0, busy: false, done: false, failed: false, timer: null };
+        STATE.captures.set(identity, entry);
+        whenVisible(() => { void waitForIdle().then(() => uploadCapture(entry)); });
+    }
 
-        const res = await authorizedRequest("POST", "/loadouts/report", payload);
+    async function uploadCapture(entry) {
+        if (entry.done || entry.busy || entry.timer || entry.key !== getAPIKey()) return;
+        if (W.document.visibilityState === "hidden") { whenVisible(() => { void uploadCapture(entry); }); return; }
+        entry.busy = true;
+        entry.attempts++;
+        let res;
+        try { res = await authorizedRequest("POST", "/loadouts/report", entry.payload); }
+        catch { res = { ok: false, status: 0, data: null }; }
+        entry.busy = false;
+        if (entry.key !== getAPIKey()) return;
         updateAuthStatus();
-
+        const defenderId = entry.payload.defender_id;
         if (res.ok && res.data?.ok) {
+            entry.done = true;
+            entry.failed = false;
+            STATE.uploaded = true;
             clearDefenderSessionCache(defenderId);
             if (res.data.latest) {
                 cacheLatestLoadout(defenderId, res.data.latest);
             }
 
-            rememberReportedLoadout(defenderId, reportState.fingerprint);
+            rememberReportedLoadout(defenderId, entry.reportState.fingerprint);
 
             const backendSaysDuplicate = res.data?.duplicate === true
                 || res.data?.unchanged === true
                 || res.data?.created === false
                 || res.data?.inserted === false;
 
-            if (!reportState.isKnownDuplicate && !backendSaysDuplicate) {
+            if (!entry.reportState.isKnownDuplicate && !backendSaysDuplicate) {
                 toastInfo("Loadout saved to the war chest.");
             }
         } else {
-            toast(apiErrorMessage(res.data, "Failed to save defender loadout."));
+            const retryable = res.status === 0 || res.status === 408 || res.status === 429 || res.status >= 500;
+            const delay = CFG.uploadRetryDelaysMs[entry.attempts - 1];
+            if (retryable && delay != null && (res.retryAfterMs || 0) <= 5 * 60 * 1000) {
+                entry.timer = W.setTimeout(() => {
+                    entry.timer = null;
+                    void uploadCapture(entry);
+                }, Math.max(delay + Math.random() * delay * 0.2, res.retryAfterMs || 0));
+            } else {
+                entry.failed = true;
+                toast("Loadout not saved. Use Retry save in Loadout settings.");
+            }
         }
+        updateCaptureStatus();
+    }
+
+    function updateCaptureStatus() {
+        const button = W.document.getElementById("loadout-retry-save");
+        if (button) button.hidden = ![...STATE.captures.values()].some(entry => entry.failed && entry.key === getAPIKey());
     }
 
     async function showHistoryModal(forceRefresh = false) {
@@ -1865,8 +2366,9 @@
     function getApiKeyHelpHtml() {
         return `
             <div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(191,145,63,0.15);color:#d7cfbf;font-size:11px;line-height:1.45;">
-                This tool uses your <b style="color:#f4e7c2;">Torn Public API key</b> only to identify your player and faction and authenticate with the Askelads backend.
+                Your <b style="color:#f4e7c2;">Torn Public API key</b> identifies you and your faction. Enemy preloading reuses player IDs already on the ranked-war page and reads our saved equipment cache only.
                 It does <b>not</b> require full-access account data.
+                Custom keys need user profile, not faction wars/members. Preloading makes no extra Torn API calls. Keys stay on this device and are sent over HTTPS to our backend when needed; captured equipment is stored and shared with authorized factions.
                 You can create or revoke a public key any time in Torn settings.
             </div>
         `;
@@ -2016,19 +2518,36 @@
             "white-space:nowrap"
         ].join(";");
 
+        panel._llPosition = () => {
+            const rect = btn.getBoundingClientRect();
+            const width = Math.min(IS_PDA ? 344 : 414, W.innerWidth - 20);
+            panel.style.position = "fixed";
+            panel.style.boxSizing = "border-box";
+            panel.style.width = width + "px";
+            panel.style.maxWidth = "calc(100vw - 20px)";
+            panel.style.left = Math.max(10, Math.min(rect.left, W.innerWidth - width - 10)) + "px";
+            const top = Math.max(10, Math.min(rect.bottom + 6, W.innerHeight / 3));
+            panel.style.top = top + "px";
+            panel.style.right = "auto";
+            panel.style.transform = "none";
+            panel.style.maxHeight = Math.max(100, W.innerHeight - top - 10) + "px";
+        };
         let panelOpen = false;
         btn.onclick = (e) => {
             e.stopPropagation();
             panelOpen = !panelOpen;
             panel.style.display = panelOpen ? "block" : "none";
+            if (panelOpen) panel._llPosition();
         };
 
-        W.document.addEventListener("click", (e) => {
+        if (STATE.panelDismissHandler) W.document.removeEventListener("click", STATE.panelDismissHandler);
+        STATE.panelDismissHandler = (e) => {
             if (panelOpen && !host.contains(e.target) && !panel.contains(e.target)) {
                 panelOpen = false;
                 panel.style.display = "none";
             }
-        });
+        };
+        W.document.addEventListener("click", STATE.panelDismissHandler);
 
         panel.querySelector("#loadout-close-panel-btn").onclick = () => {
             panelOpen = false;
@@ -2039,11 +2558,70 @@
             setStoredValue(CFG.store.quietToasts, e.target.checked ? "1" : "0");
         };
 
+        const preferences = W.document.createElement("div");
+        preferences.style.cssText = "display:grid;gap:7px;margin-top:10px;font-size:12px";
+        for (const [name, label] of [["attack", "Show saved equipment in attacks"], ["profile", "Show saved equipment on profiles"],
+            ["warCache", "Preload enemy faction (up to 100)"], ["bonusLabels", "Show bonus labels"]]) {
+            const field = W.document.createElement("label");
+            field.style.cssText = "display:flex;align-items:center;gap:7px";
+            const input = W.document.createElement("input");
+            input.type = "checkbox";
+            input.checked = preference(name);
+            input.dataset.preference = name;
+            input.onchange = () => {
+                setStoredValue(CFG.store[name], input.checked ? "1" : "0");
+                if (name === "warCache") {
+                    W.clearTimeout(STATE.warCacheTimer);
+                    if (input.checked) void warmWarCache();
+                    else showWarCacheStatus("Enemy preloading off.");
+                } else if (name === "profile" && IS_PROFILE) {
+                    if (!input.checked) {
+                        STATE.selected = null;
+                        W.document.querySelector("#ll-profile .ll-profile-grid")?.replaceChildren();
+                    }
+                    void initProfileView();
+                } else if (name === "attack" && !input.checked) {
+                    STATE.renderObserver?.disconnect();
+                    STATE.renderObserver = null;
+                    cleanupScriptOverlays();
+                    STATE.loadoutRendered = false;
+                } else {
+                    void fetchAndRenderLoadout(true);
+                }
+            };
+            field.append(input, W.document.createTextNode(label));
+            preferences.appendChild(field);
+        }
+        const cacheStatus = W.document.createElement("small");
+        cacheStatus.id = "loadout-war-cache-status";
+        preferences.appendChild(cacheStatus);
+        const retry = W.document.createElement("button");
+        retry.id = "loadout-retry-save";
+        retry.textContent = "Retry save";
+        retry.hidden = true;
+        retry.style.cssText = askeladsButtonStyle("steel");
+        retry.onclick = () => {
+            for (const entry of STATE.captures.values()) if (entry.failed && entry.key === getAPIKey()) {
+                entry.attempts = 0;
+                entry.failed = false;
+                void uploadCapture(entry);
+            }
+            updateCaptureStatus();
+        };
+        preferences.appendChild(retry);
+        panel.appendChild(preferences);
+        if (IS_FACTION) {
+            panel.querySelector("#loadout-show-history-btn").hidden = true;
+            panel.querySelector("#loadout-show-latest-btn").hidden = true;
+        }
+
         panel.querySelector("#loadout-show-history-btn").onclick = () => {
             showHistoryModal(false);
         };
 
         panel.querySelector("#loadout-show-latest-btn").onclick = () => {
+            STATE.historyIndex = 0;
+            STATE.inlineHistory = [];
             fetchAndRenderLoadout(true, true);
         };
 
@@ -2065,6 +2643,8 @@
                 }
 
                 setStoredValue(CFG.store.apiKey, key);
+                if (getAPIKey() !== key) { toast("The browser could not save this key. Check userscript storage permissions."); return; }
+                resetAttackState();
                 resetAuthorizationState();
 
                 const ok = await ensureAuthorized(true);
@@ -2076,6 +2656,7 @@
                     input.dataset.savedMask = nextMask;
                     toastInfo("Key saved. Welcome back to the war room.");
                     fetchAndRenderLoadout(true, true);
+                    void warmWarCache();
                 } else {
                     toast(STATE.authErrorMessage || "Failed to authenticate with backend.");
                 }
@@ -2085,6 +2666,10 @@
                 input.value = "";
                 input.dataset.savedMask = "";
                 setStoredValue(CFG.store.apiKey, "");
+                for (const entry of STATE.captures.values()) W.clearTimeout(entry.timer);
+                STATE.captures.clear();
+                resetAttackState();
+                W.document.querySelector("#ll-profile .ll-profile-grid")?.replaceChildren();
                 resetAuthorizationState();
                 updateAuthStatus();
                 toastInfo("API key cleared.");
@@ -2175,20 +2760,13 @@
         }, CFG.startupFallbackMs);
     }
 
-    function reportLoadoutWhenIdle(db) {
-        whenVisible(() => {
-            void waitForIdle()
-                .then(() => reportLoadout(db))
-                .catch(() => {});
-        });
-    }
-
-    function processResponse(data) {
+    function processResponse(data, nativeResponse = false) {
         if (!data || typeof data !== "object") return;
         if (!data.attackerUser && !data.DB?.attackerUser) return;
 
         const db = data.DB || data;
         const newDefenderId = extractUserId(db?.defenderUser);
+        if (!sameTargetId(newDefenderId, urlTargetId())) return;
         const oldDefenderId = extractUserId(STATE.attackData?.defenderUser);
         const hadFightID = !!STATE.attackData?.fightID;
         const isFirstData = !STATE.attackData;
@@ -2202,34 +2780,49 @@
         }
 
         STATE.attackData = db;
-        W.attackDataDebug = db;
 
         if (!hadFightID && db.fightID && hasNativeLoadout) {
             cleanupScriptOverlays();
         }
 
-        if (hasNativeLoadout && !STATE.uploaded) {
-            STATE.uploaded = true;
-            reportLoadoutWhenIdle(db);
+        if (hasNativeLoadout && nativeResponse) {
+            cleanupScriptOverlays();
+            STATE.renderObserver?.disconnect();
+            STATE.renderObserver = null;
+            STATE.selected = null;
+            STATE.inlineHistory = [];
+            STATE.historyIndex = 0;
+            W.document.querySelectorAll(".ll-inline-controls").forEach(node => mountInlineControls(node.parentElement));
+            queueCapture(db);
         } else if ((isFirstData || targetChanged) && !STATE.loadoutRendered) {
             void fetchAndRenderAutomaticLoadout();
         }
     }
 
-    if (typeof W.fetch === "function" && !W.__askeladsLoadoutFetchPatched) {
+    function isAttackDataUrl(input) {
+        try {
+            const url = new URL(typeof input === "string" ? input : input?.url || input?.href, W.location.href);
+            return url.origin === W.location.origin && url.searchParams.get("sid") === "attackData";
+        } catch { return false; }
+    }
+
+    function isNativeAttackResponse(response) {
+        return response?.ok === true && ["basic", "cors"].includes(response.type) && isAttackDataUrl(response.url);
+    }
+
+    if (IS_ATTACK && typeof W.fetch === "function" && !W.__askeladsLoadoutFetchPatched) {
         W.__askeladsLoadoutFetchPatched = true;
         const origFetch = W.fetch;
 
         W.fetch = function (...args) {
-            const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
-            if (!url.includes("sid=attackData")) {
+            if (!isAttackDataUrl(args[0])) {
                 return origFetch.apply(this, args);
             }
 
             return origFetch.apply(this, args).then(response => {
                 try {
                     void response.clone().text()
-                        .then(text => processResponse(parseJson(text)))
+                        .then(text => processResponse(parseJson(text), isNativeAttackResponse(response)))
                         .catch(() => {});
                 } catch {}
 
@@ -2241,7 +2834,7 @@
     function initPanel(fallback = false) {
         if (W.document.getElementById("loadout-panel")) return true;
 
-        const labelsContainer = W.document.querySelector("[class*='labelsContainer']");
+        const labelsContainer = IS_ATTACK ? W.document.querySelector("[class*='labelsContainer']") : null;
         if (!labelsContainer && !fallback) return false;
         if (!labelsContainer && !W.document.body) return false;
 
@@ -2254,14 +2847,15 @@
             W.document.body.appendChild(host);
         }
 
-        W.document.body.appendChild(toastHost);
+        if (!W.document.getElementById("loadout-toast-host")) W.document.body.appendChild(toastHost);
 
         const apiKey = getAPIKey();
-        if (!apiKey) {
+        if (!apiKey && IS_ATTACK) {
             panel.style.display = "block";
+            panel._llPosition();
             toast("Enter your Public API key to join the war room.");
         } else {
-            scheduleStartupLoadoutFallback();
+            if (IS_ATTACK) scheduleStartupLoadoutFallback();
         }
 
         updateAuthStatus();
@@ -2269,8 +2863,43 @@
     }
 
     const startPanelInit = () => {
-        if (initPanel()) return;
-        waitForElement("[class*='players___eKiHL'], [class*='labelsContainer'], #defender_Primary, #defender_Secondary, #defender_Melee, [class*='playerArea']", () => initPanel(true));
+        addViewerStyles();
+        if (IS_PROFILE) {
+            waitForElement(".user-profile .profile-wrapper, #profileroot .profile-wrapper", () => {
+                void initProfileView();
+                const root = W.document.querySelector(".user-profile, #profileroot");
+                if (root && !STATE.profileMountObserver) {
+                    STATE.profileMountObserver = new MutationObserver(() => {
+                        if (STATE.selected && !sameTargetId(STATE.selected.targetId, currentTargetId())) resetAttackState();
+                        if (!W.document.getElementById("ll-profile")) void initProfileView();
+                    });
+                    STATE.profileMountObserver.observe(root, { childList: true, subtree: false });
+                }
+            });
+        } else if (IS_FACTION) {
+            initPanel(true);
+            observeWarRoster();
+        } else {
+            if (!initPanel()) waitForElement("[class*='labelsContainer'], #defender_Primary, [class*='playerArea']", () => initPanel(true));
+            // Render a warm cache immediately; the fallback still covers slow mounts.
+            if (getAPIKey()) void fetchAndRenderAutomaticLoadout();
+        }
+        if (getAPIKey()) void waitForIdle().then(warmWarCache);
+        W.document.addEventListener("visibilitychange", () => {
+            if (W.document.visibilityState === "visible") void warmWarCache();
+        });
+        W.addEventListener("resize", () => {
+            const panel = W.document.getElementById("loadout-panel-inner");
+            if (panel?.style.display === "block") panel._llPosition?.();
+        });
+        W.addEventListener("pagehide", () => {
+            STATE.renderObserver?.disconnect();
+            STATE.profileMountObserver?.disconnect();
+            STATE.warRosterObserver?.disconnect();
+            W.clearTimeout(STATE.warRosterTimer);
+            W.clearTimeout(STATE.warCacheTimer);
+            for (const entry of STATE.captures.values()) W.clearTimeout(entry.timer);
+        });
     };
 
     if (W.document.readyState === "loading") {
