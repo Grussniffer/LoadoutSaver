@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const { randomUUID } = require("node:crypto");
 const source = fs.readFileSync(require("node:path").join(__dirname, "../LoadoutRevealSupabase.user.js"), "utf8");
-const exportsList = "STATE,CFG,queueCapture,uploadCapture,processResponse,isAttackDataUrl,isNativeAttackResponse,retryAfterDelay,cacheWarItems,getLatestCacheEntry,cacheLatestLoadout,cacheScope,setBackendToken,resetAttackState,savedLoadoutIsValid,warmWarCache,knownWarMemberIds,normalizeRosterIds";
+const exportsList = "STATE,CFG,queueCapture,uploadCapture,processResponse,isAttackDataUrl,isNativeAttackResponse,retryAfterDelay,cacheWarItems,getLatestCacheEntry,cacheLatestLoadout,cacheScope,setBackendToken,resetAttackState,savedLoadoutIsValid,warmWarCache,knownWarMemberIds,normalizeRosterIds,profileItemStats,profileBonusLabel,mapGlowClassToRarity";
 const instrumented = source.replace('    if (IS_ATTACK && typeof W.fetch === "function"', "    globalThis.testApi = {" + exportsList + "}; return;\n    if (IS_ATTACK && typeof W.fetch === \"function\"");
 const storage = () => {
   const map = new Map();
@@ -168,4 +168,23 @@ test("roster reuse is bounded, expires without extending itself and is account-s
   assert.equal(h.knownWarMemberIds().length, 0);
   assert.equal(h.normalizeRosterIds(Array.from({ length: 101 }, (_, i) => i + 1)).length, 0);
   assert.equal(h.normalizeRosterIds([2, -3]).length, 0);
+});
+
+test("profile item stats distinguish weapons from armour placeholders", () => {
+  const h = harness();
+  assert.equal(h.profileItemStats({ damage: 70, accuracy: 62 }, 1), "Primary · DMG 70.00 · ACC 62.00");
+  assert.equal(h.profileItemStats({ damage: 0, accuracy: 0 }, 4), "Body");
+  assert.equal(h.profileItemStats({ damage: 0, accuracy: 0 }, 6), "Head");
+  assert.equal(h.profileItemStats({ damage: null, accuracy: null }, 1), "Primary");
+  assert.equal(h.profileItemStats({ damage: "bad", accuracy: "bad" }, 1), "Primary");
+});
+
+test("profile colours use recorded rarity and bonus percentages only when present", () => {
+  const h = harness();
+  for (const rarity of ["yellow", "orange", "red"]) assert.equal(h.mapGlowClassToRarity(rarity), rarity);
+  assert.equal(h.mapGlowClassToRarity("glow-RED"), "red");
+  assert.equal(h.mapGlowClassToRarity(undefined), "");
+  assert.equal(h.profileBonusLabel({ name: "Impenetrable", percent: 7 }), "7% Impenetrable");
+  assert.equal(h.profileBonusLabel({ name: "Motivation", value: 23 }), "Motivation");
+  assert.equal(h.profileBonusLabel({ name: "23% Motivation", percent: 23 }), "23% Motivation");
 });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Askelads Loadout Loader
 // @namespace    askelads.loadout.loader
-// @version      3.8.0
+// @version      3.8.1
 // @description  Captures Torn attack data and renders saved loadouts through the Askelads backend.
 // @author       Sneip
 // @match        https://www.torn.com/page.php?sid=attack&user2ID=*
@@ -22,7 +22,7 @@
     "use strict";
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const SCRIPT_VERSION = "3.8.0";
+    const SCRIPT_VERSION = "3.8.1";
     const PAGE = new URL(W.location.href);
     const IS_ATTACK = PAGE.pathname === "/page.php" && PAGE.searchParams.get("sid") === "attack";
     const IS_PROFILE = PAGE.pathname === "/profiles.php";
@@ -1690,14 +1690,32 @@
         const style = W.document.createElement("style");
         style.id = "ll-viewer-styles";
         style.textContent = [
-            "#ll-profile{margin:12px 0;border:1px solid #6666;border-radius:8px;background:var(--default-bg-panel-color,#242424);color:var(--default-color,#ddd);font:12px/1.45 Arial,sans-serif}",
-            "#ll-profile>summary{padding:10px;cursor:pointer;font-weight:bold}",
-            "#ll-profile .ll-profile-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:0 10px 8px}",
-            "#ll-profile .ll-profile-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;padding:10px}",
-            "#ll-profile .ll-profile-item{display:flex;align-items:center;gap:8px;min-width:0;padding:7px;background:#8881;border:1px solid #7773;border-radius:5px}",
-            "#ll-profile .ll-profile-item img{width:46px;height:46px;object-fit:contain;flex-shrink:0}",
-            "#ll-profile .ll-profile-item strong{display:block} #ll-profile .ll-profile-item small{display:block;opacity:.8}",
+            "#ll-profile{position:relative;clear:both;grid-column:1/-1;min-width:0;box-sizing:border-box;margin:10px 0;border:1px solid #6666;border-radius:7px;background:var(--default-bg-panel-color,#242424);color:var(--default-color,#ddd);font:12px/1.4 Arial,sans-serif}",
+            "#ll-profile>summary{padding:9px 245px 9px 10px;cursor:pointer;font-weight:bold;min-height:18px;background:linear-gradient(#8882,#0001);border-radius:6px}",
+            "#ll-profile .ll-profile-head{position:absolute;right:7px;top:4px;display:flex;align-items:center;gap:6px}",
+            "#ll-profile .ll-profile-head #loadout-panel{padding:0;gap:0}",
+            "#ll-profile .ll-profile-head #loadout-panel>button{padding:4px 7px!important;border-radius:5px!important;font-size:11px;box-shadow:none!important}",
+            "#ll-profile .ll-profile-head .ll-inline-controls button{padding:3px 7px;font-size:11px}",
+            "#ll-profile .ll-profile-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0;padding:0 9px 6px}",
+            "#ll-profile .ll-profile-column{min-width:0}",
+            "#ll-profile .ll-profile-column+.ll-profile-column{border-left:1px solid #8883;margin-left:9px;padding-left:9px}",
+            "#ll-profile .ll-profile-column h3{font:600 10px/1.4 Arial,sans-serif;letter-spacing:.7px;text-transform:uppercase;opacity:.7;margin:7px 0 2px}",
+            "#ll-profile .ll-profile-item{display:flex;align-items:center;gap:9px;min-width:0;min-height:49px;box-sizing:border-box;padding:6px 0;border-bottom:1px solid #8882;--ll-rarity:#777;--ll-tint:#7771}",
+            "#ll-profile .ll-profile-item:last-child{border-bottom:0}",
+            "#ll-profile .ll-profile-item[data-rarity='yellow']{--ll-rarity:#c5a338;--ll-tint:#be93193b}",
+            "#ll-profile .ll-profile-item[data-rarity='orange']{--ll-rarity:#d77d30;--ll-tint:#d67a2440}",
+            "#ll-profile .ll-profile-item[data-rarity='red']{--ll-rarity:#c84848;--ll-tint:#be333343}",
+            "#ll-profile .ll-profile-thumb{display:flex;align-items:center;justify-content:center;flex:0 0 60px;height:35px;box-sizing:border-box;border:1px solid var(--ll-rarity);border-radius:5px;background:linear-gradient(160deg,#121212 25%,var(--ll-tint));box-shadow:inset 0 -5px 12px var(--ll-tint)}",
+            "#ll-profile .ll-profile-item img{display:block;width:54px;height:31px;object-fit:contain}",
+            "#ll-profile .ll-profile-info{min-width:0;flex:1;overflow-wrap:anywhere}",
+            "#ll-profile .ll-profile-name{font-size:12px;font-weight:600;line-height:1.35}",
+            "#ll-profile .ll-profile-info small{display:block;font-size:10px;line-height:1.45;opacity:.8}",
+            "#ll-profile .ll-profile-bonuses{display:flex;flex-wrap:wrap;gap:2px 7px;margin-top:2px;font-size:10px}",
+            "#ll-profile .ll-profile-bonus{border-bottom:2px solid var(--ll-rarity);line-height:1.4}",
+            "#ll-profile .ll-profile-empty,#ll-profile .ll-profile-message{padding:8px 0;opacity:.75}",
+            "#ll-profile .ll-profile-message{grid-column:1/-1}",
             "#ll-profile .ll-profile-age{font-weight:normal;opacity:.75;margin-left:8px}",
+            "@media(max-width:600px){#ll-profile>summary{padding-right:10px}#ll-profile .ll-profile-head{position:static;padding:0 9px 5px;flex-wrap:wrap}#ll-profile .ll-profile-grid{grid-template-columns:minmax(0,1fr)}#ll-profile .ll-profile-column+.ll-profile-column{border-left:0;border-top:1px solid #8883;margin-left:0;padding-left:0;margin-top:3px}}",
             ".ll-inline-controls{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap}",
             ".ll-inline-controls button{border:1px solid #8887;border-radius:5px;background:#7772;color:inherit;padding:4px 7px;cursor:pointer;font:inherit}",
             ".ll-inline-controls button:disabled{opacity:.45;cursor:default}",
@@ -1707,12 +1725,37 @@
         (W.document.head || W.document.documentElement).appendChild(style);
     }
 
+    function profilePanelAnchor() {
+        const root = W.document.querySelector(".user-profile, #profileroot");
+        // The first profile row holds User Information / Actions. Basic Information
+        // can be much further down the page, so it is not the preferred anchor.
+        let anchor = root?.querySelector(".profile-wrapper");
+        while (anchor && anchor !== root) {
+            const parent = anchor.parentElement;
+            if (!parent || !root.contains(parent)) break;
+            const parentStyle = W.getComputedStyle(parent);
+            const anchorStyle = W.getComputedStyle(anchor);
+            const safeFlow = ["block", "flow-root"].includes(parentStyle.display) ||
+                (parentStyle.display === "flex" && parentStyle.flexDirection === "column");
+            if (safeFlow && anchorStyle.float === "none" && !["absolute", "fixed"].includes(anchorStyle.position)) return anchor;
+            // Never insert a full-width panel into a row of profile cards. If the
+            // first wrapper is a column, place our panel after their common row.
+            anchor = parent;
+        }
+        // Unfamiliar top-level grid/row layout: keep the panel available below
+        // the profile instead of squeezing it into Torn's card columns.
+        if (root?.parentElement) {
+            const parentStyle = W.getComputedStyle(root.parentElement);
+            if (["block", "flow-root"].includes(parentStyle.display) ||
+                (parentStyle.display === "flex" && parentStyle.flexDirection === "column")) return root;
+        }
+        return null;
+    }
+
     function ensureProfilePanel() {
         let panel = W.document.getElementById("ll-profile");
         if (panel) return panel;
-        const root = W.document.querySelector(".user-profile, #profileroot");
-        const anchor = root?.querySelector(".basic-information")?.closest(".profile-wrapper") ||
-            root?.querySelector(".profile-wrapper");
+        const anchor = profilePanelAnchor();
         if (!anchor) return null;
         addViewerStyles();
         panel = W.document.createElement("details");
@@ -1741,45 +1784,115 @@
         stamp.title = Number.isFinite(time) ? "Observed " + new Date(time).toLocaleString() : "";
         const grid = panel.querySelector(".ll-profile-grid");
         grid.querySelector(".ll-profile-message")?.remove();
-        const labels = { 1: "Primary", 2: "Secondary", 3: "Melee", 4: "Body", 5: "Temporary", 6: "Head", 7: "Legs", 8: "Feet", 9: "Hands" };
-        for (const slot of Object.keys(labels)) {
-            const item = loadout[slot];
-            let card = grid.querySelector('[data-slot="' + slot + '"]');
-            if (!item) { card?.remove(); continue; }
-            const fingerprint = loadoutFingerprint(item) + preference("bonusLabels");
-            if (card?.dataset.fingerprint === fingerprint) continue;
-            if (!card) {
-                card = W.document.createElement("div");
-                card.className = "ll-profile-item";
-                card.dataset.slot = slot;
-                const image = W.document.createElement("img");
-                image.loading = "lazy";
-                deprioritizeImage(image);
-                card.append(image, W.document.createElement("div"));
-                grid.appendChild(card);
+        for (const [group, title, slots] of [
+            ["weapons", "Weapons", [1, 2, 3, 5]],
+            ["armour", "Armour", [6, 4, 7, 8, 9]]
+        ]) {
+            let column = grid.querySelector('[data-group="' + group + '"]');
+            if (!column) {
+                column = W.document.createElement("section");
+                column.className = "ll-profile-column";
+                column.dataset.group = group;
+                column.setAttribute("aria-label", title);
+                const heading = W.document.createElement("h3");
+                heading.textContent = title;
+                const list = W.document.createElement("div");
+                list.className = "ll-profile-list";
+                column.append(heading, list);
+                grid.appendChild(column);
             }
-            card.dataset.fingerprint = fingerprint;
-            const image = card.querySelector("img");
-            const src = "https://www.torn.com/images/items/" + Number(item.item_id) + "/large.png";
-            if (image.getAttribute("src") !== src) image.src = src;
-            image.alt = item.item_name;
-            const info = card.lastElementChild;
-            info.replaceChildren();
-            const name = W.document.createElement("strong");
-            name.textContent = item.item_name;
-            const stats = W.document.createElement("small");
-            stats.textContent = labels[slot] + (item.damage != null ? " · DMG " + formatFixed2(item.damage) : "") +
-                (item.accuracy != null ? " · ACC " + formatFixed2(item.accuracy) : "");
-            info.append(name, stats);
-            const bonuses = [...(item.bonuses || []), ...(item.mods || [])];
-            card.title = bonuses.map(b => [b.name, b.description].filter(Boolean).join(": ")).join("\n");
-            if (preference("bonusLabels") && bonuses.length) {
-                const bonus = W.document.createElement("small");
-                bonus.textContent = bonuses.map(b => b.name).filter(Boolean).join(" · ");
-                info.appendChild(bonus);
+            const list = column.querySelector(".ll-profile-list");
+            list.querySelector(".ll-profile-empty")?.remove();
+            let position = 0;
+            for (const slot of slots) {
+                const item = loadout[slot];
+                let card = list.querySelector('[data-slot="' + slot + '"]');
+                if (!item) { card?.remove(); continue; }
+                if (!card) {
+                    card = W.document.createElement("div");
+                    card.className = "ll-profile-item";
+                    card.dataset.slot = slot;
+                    const thumb = W.document.createElement("span");
+                    thumb.className = "ll-profile-thumb";
+                    const image = W.document.createElement("img");
+                    image.loading = "lazy";
+                    deprioritizeImage(image);
+                    thumb.appendChild(image);
+                    const info = W.document.createElement("div");
+                    info.className = "ll-profile-info";
+                    card.append(thumb, info);
+                }
+                // Keep slot order across history entries without recreating images.
+                if (list.children[position] !== card) list.insertBefore(card, list.children[position] || null);
+                position++;
+                const fingerprint = loadoutFingerprint(item) + preference("bonusLabels");
+                if (card.dataset.fingerprint === fingerprint) continue;
+                card.dataset.fingerprint = fingerprint;
+                const rarity = mapGlowClassToRarity(item.rarity);
+                card.dataset.rarity = rarity || "standard";
+                const thumb = card.querySelector(".ll-profile-thumb");
+                thumb.title = rarity ? rarity[0].toUpperCase() + rarity.slice(1) + " rarity" : "No recorded rarity";
+                const image = thumb.querySelector("img");
+                const src = "https://www.torn.com/images/items/" + Number(item.item_id) + "/large.png";
+                if (image.getAttribute("src") !== src) image.src = src;
+                image.alt = item.item_name;
+                const info = card.querySelector(".ll-profile-info");
+                info.replaceChildren();
+                const name = W.document.createElement("strong");
+                name.className = "ll-profile-name";
+                name.textContent = item.item_name;
+                const stats = W.document.createElement("small");
+                stats.textContent = profileItemStats(item, slot);
+                info.append(name, stats);
+                const bonuses = Array.isArray(item.bonuses) ? item.bonuses.filter(Boolean) : [];
+                const mods = Array.isArray(item.mods) ? item.mods.filter(Boolean) : [];
+                card.title = [...bonuses, ...mods].map(b => [b.name, b.description].filter(Boolean).join(": ")).join("\n");
+                if (preference("bonusLabels")) {
+                    if (bonuses.length) {
+                        const line = W.document.createElement("div");
+                        line.className = "ll-profile-bonuses";
+                        for (const bonus of bonuses) {
+                            const label = W.document.createElement("span");
+                            label.className = "ll-profile-bonus";
+                            label.textContent = profileBonusLabel(bonus);
+                            label.title = bonus.description || bonus.name || "";
+                            if (label.textContent) line.appendChild(label);
+                        }
+                        info.appendChild(line);
+                    }
+                    if (mods.length) {
+                        const line = W.document.createElement("small");
+                        line.textContent = mods.map(mod => mod.name).filter(Boolean).join(" · ");
+                        info.appendChild(line);
+                    }
+                }
+            }
+            if (!position) {
+                const empty = W.document.createElement("div");
+                empty.className = "ll-profile-empty";
+                empty.textContent = "No saved " + title.toLowerCase() + ".";
+                list.appendChild(empty);
             }
         }
         mountInlineControls(panel.querySelector(".ll-profile-head"));
+    }
+
+    function profileItemStats(item, slot) {
+        const labels = { 1: "Primary", 2: "Secondary", 3: "Melee", 4: "Body", 5: "Temporary", 6: "Head", 7: "Legs", 8: "Feet", 9: "Hands" };
+        const parts = [labels[slot]];
+        if ([1, 2, 3, 5].includes(Number(slot))) {
+            if (item.damage != null && Number.isFinite(Number(item.damage))) parts.push("DMG " + formatFixed2(item.damage));
+            if (item.accuracy != null && Number.isFinite(Number(item.accuracy))) parts.push("ACC " + formatFixed2(item.accuracy));
+        }
+        // Armour damage/accuracy fields are placeholders, not armour protection.
+        // Never fabricate a protection stat from those zeros.
+        return parts.filter(Boolean).join(" · ");
+    }
+
+    function profileBonusLabel(bonus) {
+        const name = String(bonus.name || "").trim();
+        const percent = firstNumeric(bonus.percent, bonus.percentage, bonus.bonus_percent);
+        return name && percent !== undefined && !/%/.test(name) ? percent + "% " + name : name;
     }
 
     function mountInlineControls(parent) {

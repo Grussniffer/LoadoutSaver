@@ -3,6 +3,15 @@ Tampermonkey script to load / upload Enemy loadout to DB
 
 Backend: https://loadout.grusmedia.no/loader-api
 
+## 3.8.1
+
+- Compact profile equipment lists: weapons on the left, armour on the right; stacked on mobile.
+- Saved yellow/orange/red rarity colours on item thumbnails and bonus underlines.
+- Mount after the first safe profile row rather than the lower Basic Information section.
+  Only our panel is inserted; no native profile sections are moved or restyled.
+- Hide meaningless damage/accuracy values on armour. Bonus details remain in hover tooltips.
+- Display-only change: no backend/schema change or additional API requests.
+
 ## 3.8.0
 
 - Optional saved-equipment panel on Torn profiles: collapse, recent older/newer loadouts, copy.
